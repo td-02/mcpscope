@@ -11,6 +11,7 @@ import (
 
 	"mcpscope/internal/proxy"
 	"mcpscope/internal/store"
+	"mcpscope/internal/telemetry"
 )
 
 func init() {
@@ -22,6 +23,7 @@ func newProxyCmd() *cobra.Command {
 	var port int
 	var transport string
 	var dbPath string
+	var enableOTEL bool
 
 	cmd := &cobra.Command{
 		Use:   "proxy",
@@ -46,12 +48,19 @@ func newProxyCmd() *cobra.Command {
 			}
 			defer traceStore.Close()
 
+			telemetryClient, err := telemetry.New(cmd.Context(), enableOTEL)
+			if err != nil {
+				return err
+			}
+			defer telemetryClient.Shutdown(cmd.Context())
+
 			return proxy.Run(cmd.Context(), proxy.Config{
 				Server:     server,
 				ServerName: filepath.Base(server),
 				Port:       port,
 				Transport:  normalizedTransport,
 				Store:      traceStore,
+				Telemetry:  telemetryClient,
 				Stdin:      os.Stdin,
 				Stdout:     os.Stdout,
 				Stderr:     os.Stderr,
@@ -63,6 +72,7 @@ func newProxyCmd() *cobra.Command {
 	cmd.Flags().IntVar(&port, "port", 4444, "Proxy listen port")
 	cmd.Flags().StringVar(&transport, "transport", "stdio", "Proxy transport: stdio or http")
 	cmd.Flags().StringVar(&dbPath, "db", "mcpscope.db", "SQLite database path for persisted traces")
+	cmd.Flags().BoolVar(&enableOTEL, "otel", false, "Enable OpenTelemetry export for intercepted MCP tool calls")
 
 	return cmd
 }

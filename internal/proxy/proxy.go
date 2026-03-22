@@ -18,6 +18,7 @@ import (
 
 	"mcpscope/internal/intercept"
 	"mcpscope/internal/store"
+	"mcpscope/internal/telemetry"
 )
 
 type Config struct {
@@ -26,6 +27,7 @@ type Config struct {
 	Port       int
 	Transport  string
 	Store      store.TraceStore
+	Telemetry  *telemetry.Client
 	Stdin      io.Reader
 	Stdout     io.Writer
 	Stderr     io.Writer
@@ -326,11 +328,15 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 		return err
 	}
 
+	if cfg.Telemetry != nil {
+		cfg.Telemetry.RecordCall(ctx, cfg.ServerName, event)
+	}
+
 	if cfg.Store == nil {
 		return nil
 	}
 
-	return cfg.Store.Insert(ctx, store.Trace{
+	if err := cfg.Store.Insert(ctx, store.Trace{
 		ID:           intercept.NewUUID(),
 		TraceID:      event.TraceID,
 		ServerName:   cfg.ServerName,
@@ -341,7 +347,11 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 		IsError:      event.IsError,
 		ErrorMessage: event.ErrorMessage,
 		CreatedAt:    time.Unix(0, event.ReceivedAtUnixN).UTC(),
-	})
+	}); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func validateUpstreamPort(port int) error {
