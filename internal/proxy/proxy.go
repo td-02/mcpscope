@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +29,8 @@ type Config struct {
 	ServerCommand   []string
 	UpstreamURL     string
 	ServerName      string
+	Environment     string
+	AuthToken       string
 	Port            int
 	Transport       string
 	Store           store.TraceStore
@@ -37,6 +38,7 @@ type Config struct {
 	RetentionMaxAge time.Duration
 	MaxTraceCount   int
 	RedactKeys      []string
+	NotifyWebhooks  []string
 	Dashboard       fs.FS
 	eventHub        *traceEventHub
 	tracker         *traceTracker
@@ -50,6 +52,9 @@ func Run(ctx context.Context, cfg Config) error {
 	cfg.eventHub = newTraceEventHub()
 	cfg.tracker = newTraceTracker()
 	cfg.redactor = newPayloadRedactor(cfg.RedactKeys)
+	if strings.TrimSpace(cfg.Environment) == "" {
+		cfg.Environment = "default"
+	}
 
 	switch cfg.Transport {
 	case "stdio":
@@ -64,6 +69,7 @@ func Run(ctx context.Context, cfg Config) error {
 type traceAPIRecord struct {
 	ID           string          `json:"id"`
 	TraceID      string          `json:"trace_id"`
+	Environment  string          `json:"environment"`
 	ServerName   string          `json:"server_name"`
 	Method       string          `json:"method"`
 	Params       json.RawMessage `json:"params,omitempty"`
@@ -92,6 +98,7 @@ type latencyStatRecord struct {
 }
 
 type errorStatRecord struct {
+	Environment        string     `json:"environment"`
 	Method             string     `json:"method"`
 	Count              int        `json:"count"`
 	ErrorCount         int        `json:"error_count"`
@@ -510,6 +517,7 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 	if !persist {
 		return nil
 	}
+	record.Environment = cfg.Environment
 
 	if cfg.Telemetry != nil {
 		cfg.Telemetry.RecordCall(ctx, record.ServerName, eventFromRecord(record))
@@ -526,6 +534,7 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 	if err := cfg.Store.Insert(ctx, store.Trace{
 		ID:              record.ID,
 		TraceID:         record.TraceID,
+		Environment:     cfg.Environment,
 		ServerName:      record.ServerName,
 		Method:          record.Method,
 		ParamsHash:      hashRawMessage(record.Params),
@@ -549,6 +558,10 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 		if err := cfg.Store.TrimToCount(ctx, cfg.MaxTraceCount); err != nil {
 			return err
 		}
+	}
+
+	if err := processAlertEvaluations(ctx, cfg); err != nil {
+		return err
 	}
 
 	return nil
@@ -601,10 +614,12 @@ func shutdownHTTPServer(server *http.Server) {
 func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler {
 	fileServer := http.FileServer(http.FS(cfg.Dashboard))
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/traces":
 			handleTraceList(w, r, cfg)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/export/traces":
+			handleTraceExport(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/alerts/rules":
 			handleAlertRuleList(w, r, cfg)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/alerts/rules":
@@ -613,6 +628,8 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 			handleAlertRuleDelete(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/alerts/evaluations":
 			handleAlertEvaluations(w, r, cfg)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/alerts/events":
+			handleAlertEvents(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/stats/latency":
 			handleLatencyStats(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/stats/errors":
@@ -627,6 +644,8 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
+
+	return requireAuth(cfg, handler)
 }
 
 func handleTraceList(w http.ResponseWriter, r *http.Request, cfg Config) {
@@ -636,18 +655,19 @@ func handleTraceList(w http.ResponseWriter, r *http.Request, cfg Config) {
 		return
 	}
 
-	filter, limit, offset, err := parseTraceQuery(r)
+	filter, limit, offset, err := parseTraceQuery(r, cfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	traces, err := cfg.Store.Query(r.Context(), store.QueryFilter{
-		ServerName: filter.ServerName,
-		Method:     filter.Method,
-		IsError:    filter.IsError,
-		Limit:      limit + 1,
-		Offset:     offset,
+		Environment: filter.Environment,
+		ServerName:  filter.ServerName,
+		Method:      filter.Method,
+		IsError:     filter.IsError,
+		Limit:       limit + 1,
+		Offset:      offset,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -689,7 +709,7 @@ func handleEvents(w http.ResponseWriter, r *http.Request, cfg Config) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	filter, _, _, err := parseTraceQuery(r)
+	filter, _, _, err := parseTraceQuery(r, cfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -706,6 +726,9 @@ func handleEvents(w http.ResponseWriter, r *http.Request, cfg Config) {
 				return
 			}
 			if filter.ServerName != "" && record.ServerName != filter.ServerName {
+				continue
+			}
+			if filter.Environment != "" && record.Environment != filter.Environment {
 				continue
 			}
 			if filter.Method != "" && record.Method != filter.Method {
@@ -739,7 +762,14 @@ func handleAlertRuleList(w http.ResponseWriter, r *http.Request, cfg Config) {
 		return
 	}
 
-	_ = json.NewEncoder(w).Encode(rules)
+	filtered := make([]store.AlertRule, 0, len(rules))
+	for _, rule := range rules {
+		if rule.Environment == cfg.Environment {
+			filtered = append(filtered, rule)
+		}
+	}
+
+	_ = json.NewEncoder(w).Encode(filtered)
 }
 
 func handleAlertRuleUpsert(w http.ResponseWriter, r *http.Request, cfg Config) {
@@ -761,6 +791,9 @@ func handleAlertRuleUpsert(w http.ResponseWriter, r *http.Request, cfg Config) {
 	if rule.ID == "" {
 		rule.ID = intercept.NewUUID()
 		rule.CreatedAt = time.Now().UTC()
+	}
+	if strings.TrimSpace(rule.Environment) == "" {
+		rule.Environment = cfg.Environment
 	}
 	rule.UpdatedAt = time.Now().UTC()
 	if rule.CreatedAt.IsZero() {
@@ -806,7 +839,13 @@ func handleAlertEvaluations(w http.ResponseWriter, r *http.Request, cfg Config) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	evaluations, err := evaluateAlertRules(r.Context(), cfg.Store, time.Now().UTC(), rules)
+	filtered := make([]store.AlertRule, 0, len(rules))
+	for _, rule := range rules {
+		if rule.Environment == cfg.Environment {
+			filtered = append(filtered, rule)
+		}
+	}
+	evaluations, err := evaluateAlertRules(r.Context(), cfg.Store, time.Now().UTC(), filtered)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -815,100 +854,116 @@ func handleAlertEvaluations(w http.ResponseWriter, r *http.Request, cfg Config) 
 	_ = json.NewEncoder(w).Encode(evaluations)
 }
 
+func handleAlertEvents(w http.ResponseWriter, r *http.Request, cfg Config) {
+	w.Header().Set("Content-Type", "application/json")
+	if cfg.Store == nil {
+		_ = json.NewEncoder(w).Encode([]store.AlertEvent{})
+		return
+	}
+
+	events, err := cfg.Store.ListAlertEvents(r.Context(), cfg.Environment, 100)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(events)
+}
+
 func handleLatencyStats(w http.ResponseWriter, r *http.Request, cfg Config) {
 	w.Header().Set("Content-Type", "application/json")
+	if cfg.Store == nil {
+		_ = json.NewEncoder(w).Encode([]latencyStatRecord{})
+		return
+	}
 
-	traces, err := queryWindowedTraces(r, cfg)
+	filter, err := queryWindowFilter(r, cfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	type key struct {
-		server string
-		method string
+	stats, err := cfg.Store.QueryLatencyStats(r.Context(), filter)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-
-	grouped := make(map[key][]int64)
-	for _, trace := range traces {
-		if trace.Method == "" {
-			continue
-		}
-		k := key{server: trace.ServerName, method: trace.Method}
-		grouped[k] = append(grouped[k], trace.LatencyMs)
-	}
-
-	records := make([]latencyStatRecord, 0, len(grouped))
-	for k, values := range grouped {
-		sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+	records := make([]latencyStatRecord, 0, len(stats))
+	for _, stat := range stats {
 		records = append(records, latencyStatRecord{
-			ServerName: k.server,
-			Method:     k.method,
-			Count:      len(values),
-			P50Ms:      percentile(values, 0.50),
-			P95Ms:      percentile(values, 0.95),
-			P99Ms:      percentile(values, 0.99),
+			ServerName: stat.ServerName,
+			Method:     stat.Method,
+			Count:      stat.Count,
+			P50Ms:      stat.P50Ms,
+			P95Ms:      stat.P95Ms,
+			P99Ms:      stat.P99Ms,
 		})
 	}
-
-	sort.Slice(records, func(i, j int) bool {
-		if records[i].ServerName == records[j].ServerName {
-			return records[i].Method < records[j].Method
-		}
-		return records[i].ServerName < records[j].ServerName
-	})
 
 	_ = json.NewEncoder(w).Encode(records)
 }
 
 func handleErrorStats(w http.ResponseWriter, r *http.Request, cfg Config) {
 	w.Header().Set("Content-Type", "application/json")
+	if cfg.Store == nil {
+		_ = json.NewEncoder(w).Encode([]errorStatRecord{})
+		return
+	}
 
-	traces, err := queryWindowedTraces(r, cfg)
+	filter, err := queryWindowFilter(r, cfg)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	stats, err := cfg.Store.QueryErrorStats(r.Context(), filter)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	records := make([]errorStatRecord, 0, len(stats))
+	for _, stat := range stats {
+		records = append(records, errorStatRecord{
+			Environment:        stat.Environment,
+			Method:             stat.Method,
+			Count:              stat.Count,
+			ErrorCount:         stat.ErrorCount,
+			ErrorRatePct:       stat.ErrorRatePct,
+			RecentErrorMessage: stat.RecentErrorMessage,
+			RecentErrorAt:      stat.RecentErrorAt,
+		})
+	}
+
+	_ = json.NewEncoder(w).Encode(records)
+}
+
+func handleTraceExport(w http.ResponseWriter, r *http.Request, cfg Config) {
+	w.Header().Set("Content-Type", "application/json")
+	if cfg.Store == nil {
+		_ = json.NewEncoder(w).Encode([]store.Trace{})
+		return
+	}
+
+	filter, limit, offset, err := parseTraceQuery(r, cfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	grouped := make(map[string]*errorStatRecord)
-	for _, trace := range traces {
-		if trace.Method == "" {
-			continue
-		}
-
-		record := grouped[trace.Method]
-		if record == nil {
-			record = &errorStatRecord{Method: trace.Method}
-			grouped[trace.Method] = record
-		}
-
-		record.Count++
-		if trace.IsError {
-			record.ErrorCount++
-			if record.RecentErrorAt == nil || trace.CreatedAt.After(*record.RecentErrorAt) {
-				ts := trace.CreatedAt
-				record.RecentErrorAt = &ts
-				record.RecentErrorMessage = trace.ErrorMessage
-			}
-		}
-	}
-
-	records := make([]errorStatRecord, 0, len(grouped))
-	for _, record := range grouped {
-		if record.Count > 0 {
-			record.ErrorRatePct = float64(record.ErrorCount) * 100 / float64(record.Count)
-		}
-		records = append(records, *record)
-	}
-
-	sort.Slice(records, func(i, j int) bool {
-		if records[i].ErrorRatePct == records[j].ErrorRatePct {
-			return records[i].Method < records[j].Method
-		}
-		return records[i].ErrorRatePct > records[j].ErrorRatePct
+	traces, err := cfg.Store.Query(r.Context(), store.QueryFilter{
+		TraceID:      filter.TraceID,
+		Environment:  filter.Environment,
+		ServerName:   filter.ServerName,
+		Method:       filter.Method,
+		IsError:      filter.IsError,
+		CreatedAfter: filter.CreatedAfter,
+		Limit:        limit,
+		Offset:       offset,
 	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	_ = json.NewEncoder(w).Encode(records)
+	_ = json.NewEncoder(w).Encode(traces)
 }
 
 func serveDashboardAsset(w http.ResponseWriter, r *http.Request, static fs.FS, fileServer http.Handler) {
@@ -941,6 +996,7 @@ func traceRecordFromEvent(id, serverName string, event intercept.Event) traceAPI
 	return traceAPIRecord{
 		ID:           id,
 		TraceID:      event.TraceID,
+		Environment:  "",
 		ServerName:   serverName,
 		Method:       event.Method,
 		Params:       cloneRawMessage(event.Params),
@@ -956,6 +1012,7 @@ func traceRecordFromStored(trace store.Trace) traceAPIRecord {
 	return traceAPIRecord{
 		ID:           trace.ID,
 		TraceID:      trace.TraceID,
+		Environment:  trace.Environment,
 		ServerName:   trace.ServerName,
 		Method:       trace.Method,
 		Params:       asRawJSON(trace.ParamsPayload),
@@ -1020,28 +1077,26 @@ func maxDurationMs(start, end time.Time) int64 {
 	return end.Sub(start).Milliseconds()
 }
 
-func queryWindowedTraces(r *http.Request, cfg Config) ([]store.Trace, error) {
-	if cfg.Store == nil {
-		return []store.Trace{}, nil
-	}
-
+func queryWindowFilter(r *http.Request, cfg Config) (store.QueryFilter, error) {
 	window, err := parseWindow(r.URL.Query().Get("window"))
 	if err != nil {
-		return nil, err
+		return store.QueryFilter{}, err
 	}
 
+	environment := environmentFromRequest(r, cfg)
 	serverName := strings.TrimSpace(r.URL.Query().Get("server"))
 	method := strings.TrimSpace(r.URL.Query().Get("method"))
 	start := time.Now().Add(-window)
 
-	return cfg.Store.Query(r.Context(), store.QueryFilter{
+	return store.QueryFilter{
+		Environment:  environment,
 		ServerName:   serverName,
 		Method:       method,
 		CreatedAfter: &start,
-	})
+	}, nil
 }
 
-func parseTraceQuery(r *http.Request) (store.QueryFilter, int, int, error) {
+func parseTraceQuery(r *http.Request, cfg Config) (store.QueryFilter, int, int, error) {
 	query := r.URL.Query()
 	limit := 50
 	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
@@ -1062,8 +1117,10 @@ func parseTraceQuery(r *http.Request) (store.QueryFilter, int, int, error) {
 	}
 
 	filter := store.QueryFilter{
-		ServerName: strings.TrimSpace(query.Get("server")),
-		Method:     strings.TrimSpace(query.Get("method")),
+		TraceID:     strings.TrimSpace(query.Get("trace_id")),
+		Environment: environmentFromRequest(r, cfg),
+		ServerName:  strings.TrimSpace(query.Get("server")),
+		Method:      strings.TrimSpace(query.Get("method")),
 	}
 	switch strings.TrimSpace(query.Get("status")) {
 	case "":
@@ -1078,6 +1135,37 @@ func parseTraceQuery(r *http.Request) (store.QueryFilter, int, int, error) {
 	}
 
 	return filter, limit, offset, nil
+}
+
+func environmentFromRequest(r *http.Request, cfg Config) string {
+	environment := strings.TrimSpace(r.URL.Query().Get("environment"))
+	if environment == "" {
+		environment = cfg.Environment
+	}
+	if environment == "" {
+		return "default"
+	}
+	return environment
+}
+
+func requireAuth(cfg Config, next http.Handler) http.Handler {
+	if strings.TrimSpace(cfg.AuthToken) == "" {
+		return next
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/events" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if r.Header.Get("Authorization") != "Bearer "+cfg.AuthToken && r.URL.Query().Get("token") != cfg.AuthToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func validateAlertRule(rule store.AlertRule) error {

@@ -24,6 +24,7 @@ func TestSQLiteStoreInsertAndReadBackTrace(t *testing.T) {
 	trace := Trace{
 		ID:              "550e8400-e29b-41d4-a716-446655440000",
 		TraceID:         "8f14e45f-ea4c-4d57-8b55-6e5d7f1db7b1",
+		Environment:     "prod",
 		ServerName:      "demo-server",
 		Method:          "tools/call",
 		ParamsHash:      "params-hash",
@@ -55,6 +56,9 @@ func TestSQLiteStoreInsertAndReadBackTrace(t *testing.T) {
 	if got.TraceID != trace.TraceID {
 		t.Fatalf("trace_id = %q, want %q", got.TraceID, trace.TraceID)
 	}
+	if got.Environment != trace.Environment {
+		t.Fatalf("environment = %q, want %q", got.Environment, trace.Environment)
+	}
 	if got.ServerName != trace.ServerName {
 		t.Fatalf("server_name = %q, want %q", got.ServerName, trace.ServerName)
 	}
@@ -83,7 +87,7 @@ func TestSQLiteStoreInsertAndReadBackTrace(t *testing.T) {
 		t.Fatalf("error_message = %q, want %q", got.ErrorMessage, trace.ErrorMessage)
 	}
 
-	filtered, err := store.Query(ctx, QueryFilter{TraceID: trace.TraceID, Limit: 1})
+	filtered, err := store.Query(ctx, QueryFilter{TraceID: trace.TraceID, Environment: trace.Environment, Limit: 1})
 	if err != nil {
 		t.Fatalf("Query returned error: %v", err)
 	}
@@ -112,6 +116,7 @@ func TestSQLiteStoreRetentionAndAlertRules(t *testing.T) {
 		if err := store.Insert(ctx, Trace{
 			ID:              fmt.Sprintf("trace-%d", i),
 			TraceID:         fmt.Sprintf("correlated-%d", i),
+			Environment:     "prod",
 			ServerName:      "demo-server",
 			Method:          "tools/call",
 			ParamsHash:      "params",
@@ -150,6 +155,7 @@ func TestSQLiteStoreRetentionAndAlertRules(t *testing.T) {
 
 	rule, err := store.UpsertAlertRule(ctx, AlertRule{
 		ID:            "rule-1",
+		Environment:   "prod",
 		Name:          "Error budget",
 		RuleType:      "error_rate",
 		Threshold:     5,
@@ -171,6 +177,9 @@ func TestSQLiteStoreRetentionAndAlertRules(t *testing.T) {
 	if len(rules) != 1 || rules[0].Name != "Error budget" {
 		t.Fatalf("unexpected alert rules: %+v", rules)
 	}
+	if rules[0].Environment != "prod" {
+		t.Fatalf("expected prod environment, got %+v", rules[0])
+	}
 
 	if err := store.DeleteAlertRule(ctx, "rule-1"); err != nil {
 		t.Fatalf("DeleteAlertRule returned error: %v", err)
@@ -181,5 +190,114 @@ func TestSQLiteStoreRetentionAndAlertRules(t *testing.T) {
 	}
 	if len(rules) != 0 {
 		t.Fatalf("expected no alert rules after deletion, got %+v", rules)
+	}
+}
+
+func TestSQLiteStoreAlertEventsAndStats(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "traces.db")
+
+	store, err := OpenSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLite returned error: %v", err)
+	}
+	defer store.Close()
+
+	base := time.Date(2026, 3, 30, 12, 0, 0, 0, time.UTC)
+	traces := []Trace{
+		{
+			ID: "trace-a", TraceID: "corr-a", Environment: "prod", ServerName: "alpha", Method: "tools/call",
+			ParamsHash: "a", ParamsPayload: `{}`, ResponseHash: "a", ResponsePayload: `{}`,
+			LatencyMs: 20, CreatedAt: base.Add(-4 * time.Minute),
+		},
+		{
+			ID: "trace-b", TraceID: "corr-b", Environment: "prod", ServerName: "alpha", Method: "tools/call",
+			ParamsHash: "b", ParamsPayload: `{}`, ResponseHash: "b", ResponsePayload: `{}`,
+			LatencyMs: 100, IsError: true, ErrorMessage: "boom", CreatedAt: base.Add(-3 * time.Minute),
+		},
+		{
+			ID: "trace-c", TraceID: "corr-c", Environment: "prod", ServerName: "alpha", Method: "tools/call",
+			ParamsHash: "c", ParamsPayload: `{}`, ResponseHash: "c", ResponsePayload: `{}`,
+			LatencyMs: 250, CreatedAt: base.Add(-2 * time.Minute),
+		},
+		{
+			ID: "trace-d", TraceID: "corr-d", Environment: "stage", ServerName: "alpha", Method: "tools/call",
+			ParamsHash: "d", ParamsPayload: `{}`, ResponseHash: "d", ResponsePayload: `{}`,
+			LatencyMs: 5, CreatedAt: base.Add(-1 * time.Minute),
+		},
+	}
+	for _, trace := range traces {
+		if err := store.Insert(ctx, trace); err != nil {
+			t.Fatalf("Insert returned error: %v", err)
+		}
+	}
+
+	start := base.Add(-10 * time.Minute)
+	latency, err := store.QueryLatencyStats(ctx, QueryFilter{
+		Environment:  "prod",
+		ServerName:   "alpha",
+		Method:       "tools/call",
+		CreatedAfter: &start,
+	})
+	if err != nil {
+		t.Fatalf("QueryLatencyStats returned error: %v", err)
+	}
+	if len(latency) != 1 {
+		t.Fatalf("expected 1 latency row, got %+v", latency)
+	}
+	if latency[0].Count != 3 || latency[0].P95Ms != 250 {
+		t.Fatalf("unexpected latency stats: %+v", latency[0])
+	}
+
+	errors, err := store.QueryErrorStats(ctx, QueryFilter{
+		Environment:  "prod",
+		Method:       "tools/call",
+		CreatedAfter: &start,
+	})
+	if err != nil {
+		t.Fatalf("QueryErrorStats returned error: %v", err)
+	}
+	if len(errors) != 1 {
+		t.Fatalf("expected 1 error row, got %+v", errors)
+	}
+	if errors[0].ErrorCount != 1 || errors[0].Count != 3 {
+		t.Fatalf("unexpected error stats: %+v", errors[0])
+	}
+
+	event := AlertEvent{
+		ID:             "event-1",
+		RuleID:         "rule-1",
+		Environment:    "prod",
+		RuleName:       "Prod latency",
+		Status:         "firing",
+		PreviousStatus: "ok",
+		CurrentValue:   250,
+		Threshold:      100,
+		SampleCount:    3,
+		Notification:   "https://example.invalid/webhook",
+		DeliveryStatus: "failed",
+		DeliveryError:  "timeout",
+		CreatedAt:      base,
+	}
+	if err := store.InsertAlertEvent(ctx, event); err != nil {
+		t.Fatalf("InsertAlertEvent returned error: %v", err)
+	}
+
+	events, err := store.ListAlertEvents(ctx, "prod", 10)
+	if err != nil {
+		t.Fatalf("ListAlertEvents returned error: %v", err)
+	}
+	if len(events) != 1 || events[0].RuleName != "Prod latency" {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+
+	latest, err := store.LatestAlertEvent(ctx, "prod", "rule-1")
+	if err != nil {
+		t.Fatalf("LatestAlertEvent returned error: %v", err)
+	}
+	if latest == nil || latest.Status != "firing" {
+		t.Fatalf("unexpected latest event: %+v", latest)
 	}
 }

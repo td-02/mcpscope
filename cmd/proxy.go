@@ -29,17 +29,45 @@ func newProxyCmd() *cobra.Command {
 	var retainFor string
 	var maxTraces int
 	var redactKeys []string
+	var environment string
+	var authToken string
+	var notifyWebhooks []string
 
 	cmd := &cobra.Command{
 		Use:   "proxy [command...]",
 		Short: "Launch an MCP server subprocess and proxy JSON-RPC traffic",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := validatePort(port); err != nil {
+			normalizedTransport, err := validateTransport(transport)
+			if err != nil {
 				return err
 			}
 
-			normalizedTransport, err := validateTransport(transport)
-			if err != nil {
+			dbPath = effectiveString(cmd, "db", dbPath, loadedConfig.Proxy.DB)
+			if !cmd.Flags().Changed("port") && loadedConfig.Proxy.Port > 0 {
+				port = loadedConfig.Proxy.Port
+			}
+			if !cmd.Flags().Changed("transport") && strings.TrimSpace(loadedConfig.Proxy.Transport) != "" {
+				normalizedTransport, err = validateTransport(loadedConfig.Proxy.Transport)
+				if err != nil {
+					return err
+				}
+			}
+			environment = effectiveString(cmd, "environment", environment, loadedConfig.Environment)
+			authToken = effectiveString(cmd, "auth-token", authToken, loadedConfig.AuthToken)
+			retainFor = effectiveString(cmd, "retain-for", retainFor, loadedConfig.Proxy.RetainFor)
+			if !cmd.Flags().Changed("max-traces") && loadedConfig.Proxy.MaxTraces > 0 {
+				maxTraces = loadedConfig.Proxy.MaxTraces
+			}
+			if !cmd.Flags().Changed("redact-key") && len(loadedConfig.Proxy.RedactKeys) > 0 {
+				redactKeys = loadedConfig.Proxy.RedactKeys
+			}
+			if !cmd.Flags().Changed("notify-webhook") && len(loadedConfig.Notification.WebhookURLs) > 0 {
+				notifyWebhooks = loadedConfig.Notification.WebhookURLs
+			}
+			if !cmd.Flags().Changed("otel") && loadedConfig.Proxy.EnableOTEL {
+				enableOTEL = true
+			}
+			if err := validatePort(port); err != nil {
 				return err
 			}
 
@@ -47,6 +75,7 @@ func newProxyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			retentionAge, err := parseRetentionDuration(retainFor)
 			if err != nil {
 				return err
@@ -70,11 +99,14 @@ func newProxyCmd() *cobra.Command {
 				ServerName:      target.serverName(),
 				Port:            port,
 				Transport:       normalizedTransport,
+				Environment:     defaultEnvironment(environment),
+				AuthToken:       strings.TrimSpace(authToken),
 				Store:           traceStore,
 				Telemetry:       telemetryClient,
 				RetentionMaxAge: retentionAge,
 				MaxTraceCount:   maxTraces,
 				RedactKeys:      normalizeKeys(redactKeys),
+				NotifyWebhooks:  normalizeURLs(notifyWebhooks),
 				Dashboard:       dashboardFS,
 				Stdin:           os.Stdin,
 				Stdout:          os.Stdout,
@@ -92,6 +124,9 @@ func newProxyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&retainFor, "retain-for", "168h", "How long traces should be retained, as a duration. Use 0 to disable age-based retention")
 	cmd.Flags().IntVar(&maxTraces, "max-traces", 5000, "Maximum number of traces to retain. Use 0 to disable count-based retention")
 	cmd.Flags().StringSliceVar(&redactKeys, "redact-key", []string{"apiKey", "api_key", "authorization", "token", "secret", "password"}, "JSON field names to redact before persistence and logging")
+	cmd.Flags().StringVar(&environment, "environment", "default", "Logical environment name for traces, alerts, and replay/export operations")
+	cmd.Flags().StringVar(&authToken, "auth-token", "", "Bearer token required for dashboard APIs when set")
+	cmd.Flags().StringSliceVar(&notifyWebhooks, "notify-webhook", nil, "Webhook URL that receives alert state changes. Repeatable")
 
 	return cmd
 }
@@ -204,4 +239,39 @@ func normalizeKeys(values []string) []string {
 		keys = append(keys, normalized)
 	}
 	return keys
+}
+
+func normalizeURLs(values []string) []string {
+	urls := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		normalized := strings.TrimSpace(value)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		urls = append(urls, normalized)
+	}
+	return urls
+}
+
+func effectiveString(cmd *cobra.Command, flagName, current, fallback string) string {
+	if cmd.Flags().Changed(flagName) {
+		return current
+	}
+	if strings.TrimSpace(fallback) != "" {
+		return fallback
+	}
+	return current
+}
+
+func defaultEnvironment(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "default"
+	}
+	return value
 }

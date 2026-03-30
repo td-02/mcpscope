@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -75,5 +77,41 @@ func TestTraceTrackerPersistsNotificationsImmediately(t *testing.T) {
 	}
 	if got := string(record.Params); got != `{"source":"test"}` {
 		t.Fatalf("params = %s", got)
+	}
+}
+
+func TestRequireAuthAllowsBearerAndQueryToken(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{AuthToken: "secret-token"}
+	handler := requireAuth(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	tests := []struct {
+		name   string
+		target string
+		header string
+		want   int
+	}{
+		{name: "missing", target: "/api/traces", want: http.StatusUnauthorized},
+		{name: "bearer", target: "/api/traces", header: "Bearer secret-token", want: http.StatusNoContent},
+		{name: "query", target: "/events?token=secret-token", want: http.StatusNoContent},
+		{name: "dashboard asset", target: "/", want: http.StatusNoContent},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, test.target, nil)
+			if test.header != "" {
+				req.Header.Set("Authorization", test.header)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, req)
+
+			if recorder.Code != test.want {
+				t.Fatalf("status = %d, want %d", recorder.Code, test.want)
+			}
+		})
 	}
 }
