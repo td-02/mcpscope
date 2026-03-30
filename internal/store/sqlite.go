@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/sqlite"
@@ -129,6 +130,13 @@ func (s *SQLiteStore) Query(ctx context.Context, filter QueryFilter) ([]Trace, e
 	if filter.Limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, filter.Limit)
+		if filter.Offset > 0 {
+			query += " OFFSET ?"
+			args = append(args, filter.Offset)
+		}
+	} else if filter.Offset > 0 {
+		query += " LIMIT -1 OFFSET ?"
+		args = append(args, filter.Offset)
 	}
 
 	return s.selectTraces(ctx, query, args...)
@@ -171,6 +179,123 @@ func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]Trace, erro
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
+}
+
+func (s *SQLiteStore) DeleteOlderThan(ctx context.Context, cutoff time.Time) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM traces WHERE created_at < ?`, cutoff.UTC())
+	if err != nil {
+		return fmt.Errorf("delete old traces: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) TrimToCount(ctx context.Context, keep int) error {
+	if keep <= 0 {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM traces`)
+		if err != nil {
+			return fmt.Errorf("trim traces to zero: %w", err)
+		}
+		return nil
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM traces
+		WHERE id IN (
+			SELECT id FROM traces
+			ORDER BY created_at DESC
+			LIMIT -1 OFFSET ?
+		)
+	`, keep)
+	if err != nil {
+		return fmt.Errorf("trim traces: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpsertAlertRule(ctx context.Context, rule AlertRule) (AlertRule, error) {
+	if rule.CreatedAt.IsZero() {
+		rule.CreatedAt = time.Now().UTC()
+	}
+	if rule.UpdatedAt.IsZero() {
+		rule.UpdatedAt = time.Now().UTC()
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO alert_rules (
+			id, name, rule_type, threshold, window_minutes, server_name, method, enabled, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name = excluded.name,
+			rule_type = excluded.rule_type,
+			threshold = excluded.threshold,
+			window_minutes = excluded.window_minutes,
+			server_name = excluded.server_name,
+			method = excluded.method,
+			enabled = excluded.enabled,
+			updated_at = excluded.updated_at
+	`,
+		rule.ID,
+		rule.Name,
+		rule.RuleType,
+		rule.Threshold,
+		rule.WindowMinutes,
+		rule.ServerName,
+		rule.Method,
+		boolToInt(rule.Enabled),
+		rule.CreatedAt.UTC(),
+		rule.UpdatedAt.UTC(),
+	)
+	if err != nil {
+		return AlertRule{}, fmt.Errorf("upsert alert rule: %w", err)
+	}
+
+	return rule, nil
+}
+
+func (s *SQLiteStore) ListAlertRules(ctx context.Context) ([]AlertRule, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, rule_type, threshold, window_minutes, server_name, method, enabled, created_at, updated_at
+		FROM alert_rules
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query alert rules: %w", err)
+	}
+	defer rows.Close()
+
+	var rules []AlertRule
+	for rows.Next() {
+		var rule AlertRule
+		var enabled int
+		if err := rows.Scan(
+			&rule.ID,
+			&rule.Name,
+			&rule.RuleType,
+			&rule.Threshold,
+			&rule.WindowMinutes,
+			&rule.ServerName,
+			&rule.Method,
+			&enabled,
+			&rule.CreatedAt,
+			&rule.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan alert rule: %w", err)
+		}
+		rule.Enabled = enabled != 0
+		rules = append(rules, rule)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate alert rules: %w", err)
+	}
+	return rules, nil
+}
+
+func (s *SQLiteStore) DeleteAlertRule(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM alert_rules WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete alert rule: %w", err)
+	}
+	return nil
 }
 
 func (s *SQLiteStore) selectTraces(ctx context.Context, query string, args ...any) ([]Trace, error) {
@@ -230,4 +355,11 @@ func runMigrations(db *sql.DB) error {
 	}
 
 	return nil
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

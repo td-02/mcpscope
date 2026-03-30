@@ -27,24 +27,29 @@ import (
 )
 
 type Config struct {
-	ServerCommand []string
-	UpstreamURL   string
-	ServerName    string
-	Port          int
-	Transport     string
-	Store         store.TraceStore
-	Telemetry     *telemetry.Client
-	Dashboard     fs.FS
-	eventHub      *traceEventHub
-	tracker       *traceTracker
-	Stdin         io.Reader
-	Stdout        io.Writer
-	Stderr        io.Writer
+	ServerCommand   []string
+	UpstreamURL     string
+	ServerName      string
+	Port            int
+	Transport       string
+	Store           store.TraceStore
+	Telemetry       *telemetry.Client
+	RetentionMaxAge time.Duration
+	MaxTraceCount   int
+	RedactKeys      []string
+	Dashboard       fs.FS
+	eventHub        *traceEventHub
+	tracker         *traceTracker
+	redactor        *payloadRedactor
+	Stdin           io.Reader
+	Stdout          io.Writer
+	Stderr          io.Writer
 }
 
 func Run(ctx context.Context, cfg Config) error {
 	cfg.eventHub = newTraceEventHub()
 	cfg.tracker = newTraceTracker()
+	cfg.redactor = newPayloadRedactor(cfg.RedactKeys)
 
 	switch cfg.Transport {
 	case "stdio":
@@ -67,6 +72,14 @@ type traceAPIRecord struct {
 	IsError      bool            `json:"is_error"`
 	ErrorMessage string          `json:"error_message,omitempty"`
 	CreatedAt    time.Time       `json:"created_at"`
+}
+
+type traceListResponse struct {
+	Items      []traceAPIRecord `json:"items"`
+	Offset     int              `json:"offset"`
+	Limit      int              `json:"limit"`
+	HasMore    bool             `json:"has_more"`
+	NextOffset int              `json:"next_offset"`
 }
 
 type latencyStatRecord struct {
@@ -487,6 +500,7 @@ func runHTTP(ctx context.Context, cfg Config) error {
 
 func captureAndPersist(ctx context.Context, cfg Config, transport, direction string, receivedAt, sentAt time.Time, payload []byte) error {
 	event := intercept.Capture(transport, direction, receivedAt, sentAt, payload)
+	event = cfg.redactor.Event(event)
 
 	if err := intercept.EmitLog(cfg.Stderr, event); err != nil {
 		return err
@@ -524,6 +538,17 @@ func captureAndPersist(ctx context.Context, cfg Config, transport, direction str
 		CreatedAt:       record.CreatedAt.UTC(),
 	}); err != nil {
 		return err
+	}
+
+	if cfg.RetentionMaxAge > 0 {
+		if err := cfg.Store.DeleteOlderThan(ctx, record.CreatedAt.Add(-cfg.RetentionMaxAge)); err != nil {
+			return err
+		}
+	}
+	if cfg.MaxTraceCount > 0 {
+		if err := cfg.Store.TrimToCount(ctx, cfg.MaxTraceCount); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -580,6 +605,14 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/traces":
 			handleTraceList(w, r, cfg)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/alerts/rules":
+			handleAlertRuleList(w, r, cfg)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/alerts/rules":
+			handleAlertRuleUpsert(w, r, cfg)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/alerts/rules":
+			handleAlertRuleDelete(w, r, cfg)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/alerts/evaluations":
+			handleAlertEvaluations(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/stats/latency":
 			handleLatencyStats(w, r, cfg)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/stats/errors":
@@ -599,18 +632,31 @@ func newHTTPHandler(cfg Config, proxyPostHandler http.HandlerFunc) http.Handler 
 func handleTraceList(w http.ResponseWriter, r *http.Request, cfg Config) {
 	w.Header().Set("Content-Type", "application/json")
 	if cfg.Store == nil {
-		_ = json.NewEncoder(w).Encode([]traceAPIRecord{})
+		_ = json.NewEncoder(w).Encode(traceListResponse{Items: []traceAPIRecord{}})
 		return
 	}
 
-	serverName := strings.TrimSpace(r.URL.Query().Get("server"))
+	filter, limit, offset, err := parseTraceQuery(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	traces, err := cfg.Store.Query(r.Context(), store.QueryFilter{
-		ServerName: serverName,
-		Limit:      200,
+		ServerName: filter.ServerName,
+		Method:     filter.Method,
+		IsError:    filter.IsError,
+		Limit:      limit + 1,
+		Offset:     offset,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	hasMore := len(traces) > limit
+	if hasMore {
+		traces = traces[:limit]
 	}
 
 	records := make([]traceAPIRecord, 0, len(traces))
@@ -618,7 +664,13 @@ func handleTraceList(w http.ResponseWriter, r *http.Request, cfg Config) {
 		records = append(records, traceRecordFromStored(trace))
 	}
 
-	_ = json.NewEncoder(w).Encode(records)
+	_ = json.NewEncoder(w).Encode(traceListResponse{
+		Items:      records,
+		Offset:     offset,
+		Limit:      limit,
+		HasMore:    hasMore,
+		NextOffset: offset + len(records),
+	})
 }
 
 func handleEvents(w http.ResponseWriter, r *http.Request, cfg Config) {
@@ -637,7 +689,11 @@ func handleEvents(w http.ResponseWriter, r *http.Request, cfg Config) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	serverName := strings.TrimSpace(r.URL.Query().Get("server"))
+	filter, _, _, err := parseTraceQuery(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	ch, unsubscribe := cfg.eventHub.Subscribe()
 	defer unsubscribe()
 
@@ -649,7 +705,13 @@ func handleEvents(w http.ResponseWriter, r *http.Request, cfg Config) {
 			if !ok {
 				return
 			}
-			if serverName != "" && record.ServerName != serverName {
+			if filter.ServerName != "" && record.ServerName != filter.ServerName {
+				continue
+			}
+			if filter.Method != "" && record.Method != filter.Method {
+				continue
+			}
+			if filter.IsError != nil && record.IsError != *filter.IsError {
 				continue
 			}
 			payload, err := json.Marshal(record)
@@ -662,6 +724,95 @@ func handleEvents(w http.ResponseWriter, r *http.Request, cfg Config) {
 			flusher.Flush()
 		}
 	}
+}
+
+func handleAlertRuleList(w http.ResponseWriter, r *http.Request, cfg Config) {
+	w.Header().Set("Content-Type", "application/json")
+	if cfg.Store == nil {
+		_ = json.NewEncoder(w).Encode([]store.AlertRule{})
+		return
+	}
+
+	rules, err := cfg.Store.ListAlertRules(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(rules)
+}
+
+func handleAlertRuleUpsert(w http.ResponseWriter, r *http.Request, cfg Config) {
+	w.Header().Set("Content-Type", "application/json")
+	if cfg.Store == nil {
+		http.Error(w, "alert storage unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var rule store.AlertRule
+	if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+		http.Error(w, "invalid alert rule payload", http.StatusBadRequest)
+		return
+	}
+	if err := validateAlertRule(rule); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if rule.ID == "" {
+		rule.ID = intercept.NewUUID()
+		rule.CreatedAt = time.Now().UTC()
+	}
+	rule.UpdatedAt = time.Now().UTC()
+	if rule.CreatedAt.IsZero() {
+		rule.CreatedAt = rule.UpdatedAt
+	}
+
+	saved, err := cfg.Store.UpsertAlertRule(r.Context(), rule)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(saved)
+}
+
+func handleAlertRuleDelete(w http.ResponseWriter, r *http.Request, cfg Config) {
+	if cfg.Store == nil {
+		http.Error(w, "alert storage unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		http.Error(w, "missing alert rule id", http.StatusBadRequest)
+		return
+	}
+	if err := cfg.Store.DeleteAlertRule(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func handleAlertEvaluations(w http.ResponseWriter, r *http.Request, cfg Config) {
+	w.Header().Set("Content-Type", "application/json")
+	if cfg.Store == nil {
+		_ = json.NewEncoder(w).Encode([]alertEvaluation{})
+		return
+	}
+
+	rules, err := cfg.Store.ListAlertRules(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	evaluations, err := evaluateAlertRules(r.Context(), cfg.Store, time.Now().UTC(), rules)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(evaluations)
 }
 
 func handleLatencyStats(w http.ResponseWriter, r *http.Request, cfg Config) {
@@ -880,12 +1031,71 @@ func queryWindowedTraces(r *http.Request, cfg Config) ([]store.Trace, error) {
 	}
 
 	serverName := strings.TrimSpace(r.URL.Query().Get("server"))
+	method := strings.TrimSpace(r.URL.Query().Get("method"))
 	start := time.Now().Add(-window)
 
 	return cfg.Store.Query(r.Context(), store.QueryFilter{
 		ServerName:   serverName,
+		Method:       method,
 		CreatedAfter: &start,
 	})
+}
+
+func parseTraceQuery(r *http.Request) (store.QueryFilter, int, int, error) {
+	query := r.URL.Query()
+	limit := 50
+	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 200 {
+			return store.QueryFilter{}, 0, 0, fmt.Errorf("limit must be between 1 and 200")
+		}
+		limit = parsed
+	}
+
+	offset := 0
+	if raw := strings.TrimSpace(query.Get("offset")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			return store.QueryFilter{}, 0, 0, fmt.Errorf("offset must be 0 or greater")
+		}
+		offset = parsed
+	}
+
+	filter := store.QueryFilter{
+		ServerName: strings.TrimSpace(query.Get("server")),
+		Method:     strings.TrimSpace(query.Get("method")),
+	}
+	switch strings.TrimSpace(query.Get("status")) {
+	case "":
+	case "error":
+		value := true
+		filter.IsError = &value
+	case "success":
+		value := false
+		filter.IsError = &value
+	default:
+		return store.QueryFilter{}, 0, 0, fmt.Errorf("status must be empty, success, or error")
+	}
+
+	return filter, limit, offset, nil
+}
+
+func validateAlertRule(rule store.AlertRule) error {
+	if strings.TrimSpace(rule.Name) == "" {
+		return fmt.Errorf("alert rule name is required")
+	}
+	switch rule.RuleType {
+	case "error_rate", "latency_p95":
+	default:
+		return fmt.Errorf("rule_type must be error_rate or latency_p95")
+	}
+	if rule.Threshold < 0 {
+		return fmt.Errorf("threshold must be non-negative")
+	}
+	if rule.WindowMinutes < 1 {
+		return fmt.Errorf("window_minutes must be at least 1")
+	}
+	return nil
 }
 
 func parseWindow(raw string) (time.Duration, error) {

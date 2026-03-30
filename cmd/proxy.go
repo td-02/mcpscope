@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -25,6 +26,9 @@ func newProxyCmd() *cobra.Command {
 	var transport string
 	var dbPath string
 	var enableOTEL bool
+	var retainFor string
+	var maxTraces int
+	var redactKeys []string
 
 	cmd := &cobra.Command{
 		Use:   "proxy [command...]",
@@ -43,6 +47,10 @@ func newProxyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			retentionAge, err := parseRetentionDuration(retainFor)
+			if err != nil {
+				return err
+			}
 
 			traceStore, err := store.OpenSQLite(cmd.Context(), dbPath)
 			if err != nil {
@@ -57,17 +65,20 @@ func newProxyCmd() *cobra.Command {
 			defer telemetryClient.Shutdown(cmd.Context())
 
 			return proxy.Run(cmd.Context(), proxy.Config{
-				ServerCommand: target.command,
-				UpstreamURL:   target.upstreamURL,
-				ServerName:    target.serverName(),
-				Port:          port,
-				Transport:     normalizedTransport,
-				Store:         traceStore,
-				Telemetry:     telemetryClient,
-				Dashboard:     dashboardFS,
-				Stdin:         os.Stdin,
-				Stdout:        os.Stdout,
-				Stderr:        os.Stderr,
+				ServerCommand:   target.command,
+				UpstreamURL:     target.upstreamURL,
+				ServerName:      target.serverName(),
+				Port:            port,
+				Transport:       normalizedTransport,
+				Store:           traceStore,
+				Telemetry:       telemetryClient,
+				RetentionMaxAge: retentionAge,
+				MaxTraceCount:   maxTraces,
+				RedactKeys:      normalizeKeys(redactKeys),
+				Dashboard:       dashboardFS,
+				Stdin:           os.Stdin,
+				Stdout:          os.Stdout,
+				Stderr:          os.Stderr,
 			})
 		},
 	}
@@ -78,6 +89,9 @@ func newProxyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&transport, "transport", "stdio", "Proxy transport: stdio or http")
 	cmd.Flags().StringVar(&dbPath, "db", "mcpscope.db", "SQLite database path for persisted traces")
 	cmd.Flags().BoolVar(&enableOTEL, "otel", false, "Enable OpenTelemetry export for intercepted MCP tool calls")
+	cmd.Flags().StringVar(&retainFor, "retain-for", "168h", "How long traces should be retained, as a duration. Use 0 to disable age-based retention")
+	cmd.Flags().IntVar(&maxTraces, "max-traces", 5000, "Maximum number of traces to retain. Use 0 to disable count-based retention")
+	cmd.Flags().StringSliceVar(&redactKeys, "redact-key", []string{"apiKey", "api_key", "authorization", "token", "secret", "password"}, "JSON field names to redact before persistence and logging")
 
 	return cmd
 }
@@ -161,4 +175,33 @@ func commandFromInputs(server string, args []string) []string {
 		return nil
 	}
 	return []string{server}
+}
+
+func parseRetentionDuration(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("--retain-for must be a valid duration")
+	}
+	return duration, nil
+}
+
+func normalizeKeys(values []string) []string {
+	keys := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		keys = append(keys, normalized)
+	}
+	return keys
 }

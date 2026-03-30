@@ -12,8 +12,10 @@ import './App.css'
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend)
 
-type TabKey = 'traces' | 'latency' | 'errors'
+type TabKey = 'traces' | 'latency' | 'errors' | 'alerts'
 type WindowKey = '5m' | '30m' | '1h'
+type StatusFilter = '' | 'success' | 'error'
+type AlertRuleType = 'error_rate' | 'latency_p95'
 
 type TraceRecord = {
   id: string
@@ -26,6 +28,14 @@ type TraceRecord = {
   is_error: boolean
   error_message?: string
   created_at: string
+}
+
+type TraceListResponse = {
+  items: TraceRecord[]
+  offset: number
+  limit: number
+  has_more: boolean
+  next_offset: number
 }
 
 type LatencyStatRecord = {
@@ -46,6 +56,31 @@ type ErrorStatRecord = {
   recent_error_at?: string
 }
 
+type AlertRule = {
+  id: string
+  name: string
+  rule_type: AlertRuleType
+  threshold: number
+  window_minutes: number
+  server_name?: string
+  method?: string
+  enabled: boolean
+}
+
+type AlertEvaluation = {
+  rule_id: string
+  name: string
+  rule_type: AlertRuleType
+  status: 'firing' | 'ok' | 'no_data' | 'disabled'
+  threshold: number
+  current_value: number
+  window_minutes: number
+  server_name?: string
+  method?: string
+  sample_count: number
+  last_evaluated_at: string
+}
+
 const windows: { value: WindowKey; label: string }[] = [
   { value: '5m', label: 'Last 5m' },
   { value: '30m', label: 'Last 30m' },
@@ -56,41 +91,73 @@ const tabs: { key: TabKey; label: string }[] = [
   { key: 'traces', label: 'Traces' },
   { key: 'latency', label: 'Latency' },
   { key: 'errors', label: 'Errors' },
+  { key: 'alerts', label: 'Alerts' },
 ]
 
 function App() {
   const [activeTab, setActiveTab] = useState<TabKey>('traces')
   const [windowKey, setWindowKey] = useState<WindowKey>('5m')
   const [selectedServer, setSelectedServer] = useState<string>('')
+  const [methodFilter, setMethodFilter] = useState<string>('')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('')
 
   const [traces, setTraces] = useState<TraceRecord[]>([])
+  const [traceOffset, setTraceOffset] = useState(0)
+  const [hasMoreTraces, setHasMoreTraces] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [latencyStats, setLatencyStats] = useState<LatencyStatRecord[]>([])
   const [errorStats, setErrorStats] = useState<ErrorStatRecord[]>([])
+  const [alertRules, setAlertRules] = useState<AlertRule[]>([])
+  const [alertEvaluations, setAlertEvaluations] = useState<AlertEvaluation[]>([])
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [streamState, setStreamState] = useState<'connecting' | 'live' | 'closed'>('connecting')
+  const [alertDraft, setAlertDraft] = useState({
+    name: '',
+    rule_type: 'error_rate' as AlertRuleType,
+    threshold: '5',
+    window_minutes: '15',
+    server_name: '',
+    method: '',
+  })
 
   useEffect(() => {
     let active = true
 
-    const loadTraces = async () => {
-      const response = await fetch(`/api/traces${withQuery({ server: selectedServer })}`)
+    const loadTraces = async (offset = 0, append = false) => {
+      const response = await fetch(
+        `/api/traces${withQuery({
+          server: selectedServer,
+          method: methodFilter,
+          status: statusFilter,
+          limit: '50',
+          offset: String(offset),
+        })}`,
+      )
       if (!response.ok) {
         throw new Error(`failed to load traces: ${response.status}`)
       }
 
-      const data = (await response.json()) as TraceRecord[]
-      if (active) {
-        setTraces(data)
+      const data = (await response.json()) as TraceListResponse
+      if (!active) {
+        return
       }
+
+      setTraceOffset(data.next_offset)
+      setHasMoreTraces(data.has_more)
+      setTraces((current) => (append ? [...current, ...data.items] : data.items))
     }
 
     loadTraces().catch(() => {
       if (active) {
         setTraces([])
+        setTraceOffset(0)
+        setHasMoreTraces(false)
       }
     })
 
-    const source = new EventSource(`/events${withQuery({ server: selectedServer })}`)
+    const source = new EventSource(
+      `/events${withQuery({ server: selectedServer, method: methodFilter, status: statusFilter })}`,
+    )
     source.onopen = () => {
       if (active) {
         setStreamState('live')
@@ -104,7 +171,7 @@ function App() {
       const next = JSON.parse(event.data) as TraceRecord
       setTraces((current) => {
         const deduped = current.filter((trace) => trace.id !== next.id)
-        return [next, ...deduped].slice(0, 200)
+        return [next, ...deduped].slice(0, Math.max(deduped.length, 50))
       })
     }
     source.onerror = () => {
@@ -117,25 +184,29 @@ function App() {
       active = false
       source.close()
     }
-  }, [selectedServer])
+  }, [selectedServer, methodFilter, statusFilter])
 
   useEffect(() => {
     let active = true
 
-    const loadStats = async () => {
-      const [latencyResponse, errorResponse] = await Promise.all([
-        fetch(`/api/stats/latency${withQuery({ window: windowKey, server: selectedServer })}`),
-        fetch(`/api/stats/errors${withQuery({ window: windowKey, server: selectedServer })}`),
+    const loadPanels = async () => {
+      const [latencyResponse, errorResponse, ruleResponse, evaluationResponse] = await Promise.all([
+        fetch(`/api/stats/latency${withQuery({ window: windowKey, server: selectedServer, method: methodFilter })}`),
+        fetch(`/api/stats/errors${withQuery({ window: windowKey, server: selectedServer, method: methodFilter })}`),
+        fetch('/api/alerts/rules'),
+        fetch('/api/alerts/evaluations'),
       ])
 
-      if (!latencyResponse.ok || !errorResponse.ok) {
-        throw new Error('failed to load stats')
+      if (!latencyResponse.ok || !errorResponse.ok || !ruleResponse.ok || !evaluationResponse.ok) {
+        throw new Error('failed to load dashboard data')
       }
 
-      const [latencyData, errorData] = (await Promise.all([
+      const [latencyData, errorData, rules, evaluations] = (await Promise.all([
         latencyResponse.json(),
         errorResponse.json(),
-      ])) as [LatencyStatRecord[], ErrorStatRecord[]]
+        ruleResponse.json(),
+        evaluationResponse.json(),
+      ])) as [LatencyStatRecord[], ErrorStatRecord[], AlertRule[], AlertEvaluation[]]
 
       if (!active) {
         return
@@ -143,23 +214,26 @@ function App() {
 
       setLatencyStats(latencyData)
       setErrorStats(errorData)
+      setAlertRules(rules)
+      setAlertEvaluations(evaluations)
     }
 
-    loadStats().catch(() => {
+    loadPanels().catch(() => {
       if (!active) {
         return
       }
       setLatencyStats([])
       setErrorStats([])
+      setAlertRules([])
+      setAlertEvaluations([])
     })
 
     const interval = window.setInterval(() => {
-      loadStats().catch(() => {
+      loadPanels().catch(() => {
         if (!active) {
           return
         }
-        setLatencyStats([])
-        setErrorStats([])
+        setAlertEvaluations([])
       })
     }, 10_000)
 
@@ -167,7 +241,7 @@ function App() {
       active = false
       window.clearInterval(interval)
     }
-  }, [selectedServer, windowKey])
+  }, [selectedServer, windowKey, methodFilter])
 
   const stats = useMemo(() => {
     const total = traces.length
@@ -176,16 +250,22 @@ function App() {
       total === 0
         ? 0
         : Math.round(traces.reduce((sum, trace) => sum + trace.latency_ms, 0) / total)
+    const firingAlerts = alertEvaluations.filter((alert) => alert.status === 'firing').length
 
-    return { total, errors, avgLatency }
-  }, [traces])
+    return { total, errors, avgLatency, firingAlerts }
+  }, [traces, alertEvaluations])
 
   const serverOptions = useMemo(() => {
     const values = new Set<string>()
     traces.forEach((trace) => values.add(trace.server_name))
     latencyStats.forEach((record) => values.add(record.server_name))
+    alertRules.forEach((rule) => {
+      if (rule.server_name) {
+        values.add(rule.server_name)
+      }
+    })
     return ['', ...Array.from(values).sort()]
-  }, [traces, latencyStats])
+  }, [traces, latencyStats, alertRules])
 
   const latencyChartData = useMemo(() => {
     const labels = latencyStats.map((record) => `${record.server_name} :: ${record.method}`)
@@ -211,6 +291,75 @@ function App() {
     }
   }, [latencyStats])
 
+  const loadMoreTraces = async () => {
+    setLoadingMore(true)
+    try {
+      const response = await fetch(
+        `/api/traces${withQuery({
+          server: selectedServer,
+          method: methodFilter,
+          status: statusFilter,
+          limit: '50',
+          offset: String(traceOffset),
+        })}`,
+      )
+      if (!response.ok) {
+        throw new Error('failed to load more traces')
+      }
+      const data = (await response.json()) as TraceListResponse
+      setTraceOffset(data.next_offset)
+      setHasMoreTraces(data.has_more)
+      setTraces((current) => [...current, ...data.items])
+    } finally {
+      setLoadingMore(false)
+    }
+  }
+
+  const saveAlertRule = async () => {
+    const response = await fetch('/api/alerts/rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: alertDraft.name,
+        rule_type: alertDraft.rule_type,
+        threshold: Number(alertDraft.threshold),
+        window_minutes: Number(alertDraft.window_minutes),
+        server_name: alertDraft.server_name,
+        method: alertDraft.method,
+        enabled: true,
+      }),
+    })
+    if (!response.ok) {
+      return
+    }
+
+    setAlertDraft({
+      name: '',
+      rule_type: 'error_rate',
+      threshold: '5',
+      window_minutes: '15',
+      server_name: '',
+      method: '',
+    })
+
+    const [rulesResponse, evaluationsResponse] = await Promise.all([
+      fetch('/api/alerts/rules'),
+      fetch('/api/alerts/evaluations'),
+    ])
+    setAlertRules((await rulesResponse.json()) as AlertRule[])
+    setAlertEvaluations((await evaluationsResponse.json()) as AlertEvaluation[])
+  }
+
+  const deleteAlertRule = async (id: string) => {
+    const response = await fetch(`/api/alerts/rules${withQuery({ id })}`, { method: 'DELETE' })
+    if (!response.ok) {
+      return
+    }
+
+    setAlertRules((current) => current.filter((rule) => rule.id !== id))
+    setAlertEvaluations((current) => current.filter((rule) => rule.rule_id !== id))
+  }
+
   return (
     <main className="shell">
       <nav className="topbar">
@@ -228,6 +377,20 @@ function App() {
                   {option || 'All servers'}
                 </option>
               ))}
+            </select>
+          </label>
+
+          <label>
+            <span>Method</span>
+            <input value={methodFilter} onChange={(event) => setMethodFilter(event.target.value)} placeholder="tools/call" />
+          </label>
+
+          <label>
+            <span>Status</span>
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}>
+              <option value="">All statuses</option>
+              <option value="success">Success</option>
+              <option value="error">Error</option>
             </select>
           </label>
 
@@ -266,7 +429,7 @@ function App() {
             <strong data-state={streamState}>{streamState}</strong>
           </div>
           <div>
-            <span>Total traces</span>
+            <span>Visible traces</span>
             <strong>{stats.total}</strong>
           </div>
           <div>
@@ -277,6 +440,10 @@ function App() {
             <span>Avg latency</span>
             <strong>{stats.avgLatency} ms</strong>
           </div>
+          <div>
+            <span>Firing alerts</span>
+            <strong data-state={stats.firingAlerts > 0 ? 'closed' : 'live'}>{stats.firingAlerts}</strong>
+          </div>
         </div>
       </section>
 
@@ -285,7 +452,7 @@ function App() {
           <div className="table-header">
             <div>
               <h2>Recent tool calls</h2>
-              <p>Newest traces appear instantly as `mcpscope` intercepts them.</p>
+              <p>Traces are paginated, retained by policy, and already redacted before they reach the UI.</p>
             </div>
           </div>
           <div className="table-wrap">
@@ -353,6 +520,13 @@ function App() {
               </tbody>
             </table>
           </div>
+          {hasMoreTraces ? (
+            <div className="footer-actions">
+              <button type="button" className="load-more" onClick={loadMoreTraces} disabled={loadingMore}>
+                {loadingMore ? 'Loading...' : 'Load More'}
+              </button>
+            </div>
+          ) : null}
         </section>
       ) : null}
 
@@ -419,6 +593,108 @@ function App() {
           )}
         </section>
       ) : null}
+
+      {activeTab === 'alerts' ? (
+        <section className="alerts-layout">
+          <section className="panel-card">
+            <div className="panel-header">
+              <div>
+                <h2>Alert Rules</h2>
+                <p>Start with simple latency and error-rate thresholds before adding external notifiers.</p>
+              </div>
+            </div>
+            <div className="alert-form">
+              <label>
+                <span>Name</span>
+                <input value={alertDraft.name} onChange={(event) => setAlertDraft((current) => ({ ...current, name: event.target.value }))} />
+              </label>
+              <label>
+                <span>Type</span>
+                <select value={alertDraft.rule_type} onChange={(event) => setAlertDraft((current) => ({ ...current, rule_type: event.target.value as AlertRuleType }))}>
+                  <option value="error_rate">Error Rate %</option>
+                  <option value="latency_p95">Latency P95 ms</option>
+                </select>
+              </label>
+              <label>
+                <span>Threshold</span>
+                <input value={alertDraft.threshold} onChange={(event) => setAlertDraft((current) => ({ ...current, threshold: event.target.value }))} />
+              </label>
+              <label>
+                <span>Window Minutes</span>
+                <input value={alertDraft.window_minutes} onChange={(event) => setAlertDraft((current) => ({ ...current, window_minutes: event.target.value }))} />
+              </label>
+              <label>
+                <span>Server</span>
+                <input value={alertDraft.server_name} onChange={(event) => setAlertDraft((current) => ({ ...current, server_name: event.target.value }))} placeholder="optional" />
+              </label>
+              <label>
+                <span>Method</span>
+                <input value={alertDraft.method} onChange={(event) => setAlertDraft((current) => ({ ...current, method: event.target.value }))} placeholder="optional" />
+              </label>
+              <button type="button" className="load-more" onClick={saveAlertRule}>
+                Save Rule
+              </button>
+            </div>
+
+            <div className="timeline">
+              {alertRules.length === 0 ? (
+                <p className="empty-block">No alert rules yet.</p>
+              ) : (
+                alertRules.map((rule) => (
+                  <article key={rule.id} className="timeline-item">
+                    <div className="timeline-top">
+                      <div>
+                        <h3>{rule.name}</h3>
+                        <p>{rule.rule_type} threshold {rule.threshold}</p>
+                      </div>
+                      <button type="button" className="inline-action" onClick={() => deleteAlertRule(rule.id)}>
+                        Delete
+                      </button>
+                    </div>
+                    <p className="timeline-meta">
+                      {rule.window_minutes}m {rule.server_name ? `• ${rule.server_name}` : ''} {rule.method ? `• ${rule.method}` : ''}
+                    </p>
+                  </article>
+                ))
+              )}
+            </div>
+          </section>
+
+          <section className="panel-card">
+            <div className="panel-header">
+              <div>
+                <h2>Alert Evaluations</h2>
+                <p>Rules are evaluated live against the retained trace window.</p>
+              </div>
+            </div>
+            <div className="timeline">
+              {alertEvaluations.length === 0 ? (
+                <p className="empty-block">No alert evaluations available.</p>
+              ) : (
+                alertEvaluations.map((item) => (
+                  <article key={item.rule_id} className="timeline-item">
+                    <div className="timeline-top">
+                      <div>
+                        <h3>{item.name}</h3>
+                        <p>{item.rule_type} over {item.window_minutes}m window</p>
+                      </div>
+                      <span className={statusPillClass(item.status)}>
+                        {item.status.replace('_', ' ')}
+                      </span>
+                    </div>
+                    <p className="timeline-message">
+                      Current {item.current_value.toFixed(1)} vs threshold {item.threshold.toFixed(1)}
+                    </p>
+                    <p className="timeline-meta">
+                      {item.sample_count} traces evaluated {item.last_evaluated_at ? `• ${formatTimestamp(item.last_evaluated_at)}` : ''}
+                    </p>
+                  </article>
+                ))
+              )}
+            </div>
+          </section>
+        </section>
+      ) : null}
     </main>
   )
 }
@@ -444,6 +720,16 @@ function formatPayload(payload: unknown) {
   }
 
   return JSON.stringify(payload, null, 2)
+}
+
+function statusPillClass(status: AlertEvaluation['status']) {
+  if (status === 'firing') {
+    return 'pill error'
+  }
+  if (status === 'ok') {
+    return 'pill success'
+  }
+  return 'pill neutral'
 }
 
 export default App

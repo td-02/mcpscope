@@ -148,3 +148,50 @@ func TestResolveProxyTarget(t *testing.T) {
 		})
 	}
 }
+
+func TestParseRetentionDuration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		raw     string
+		want    string
+		wantErr bool
+	}{
+		{raw: "168h", want: "168h0m0s"},
+		{raw: "0", want: "0s"},
+		{raw: "bad", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.raw, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := parseRetentionDuration(tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.String() != tc.want {
+				t.Fatalf("duration = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeKeys(t *testing.T) {
+	t.Parallel()
+
+	got := normalizeKeys([]string{" token ", "TOKEN", "", "secret"})
+	if len(got) != 2 {
+		t.Fatalf("normalizeKeys length = %d, want 2", len(got))
+	}
+	if got[0] != "token" || got[1] != "secret" {
+		t.Fatalf("normalizeKeys = %v", got)
+	}
+}

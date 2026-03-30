@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -91,5 +92,94 @@ func TestSQLiteStoreInsertAndReadBackTrace(t *testing.T) {
 	}
 	if filtered[0].CreatedAt.UTC().Format(time.RFC3339Nano) != createdAt.UTC().Format(time.RFC3339Nano) {
 		t.Fatalf("created_at = %s, want %s", filtered[0].CreatedAt.UTC().Format(time.RFC3339Nano), createdAt.UTC().Format(time.RFC3339Nano))
+	}
+}
+
+func TestSQLiteStoreRetentionAndAlertRules(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "traces.db")
+
+	store, err := OpenSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLite returned error: %v", err)
+	}
+	defer store.Close()
+
+	for i := 0; i < 3; i++ {
+		ts := time.Date(2026, 3, 20, 9, 0, i, 0, time.UTC)
+		if err := store.Insert(ctx, Trace{
+			ID:              fmt.Sprintf("trace-%d", i),
+			TraceID:         fmt.Sprintf("correlated-%d", i),
+			ServerName:      "demo-server",
+			Method:          "tools/call",
+			ParamsHash:      "params",
+			ParamsPayload:   `{}`,
+			ResponseHash:    "resp",
+			ResponsePayload: `{}`,
+			LatencyMs:       int64(10 + i),
+			CreatedAt:       ts,
+		}); err != nil {
+			t.Fatalf("Insert returned error: %v", err)
+		}
+	}
+
+	if err := store.DeleteOlderThan(ctx, time.Date(2026, 3, 20, 9, 0, 1, 0, time.UTC)); err != nil {
+		t.Fatalf("DeleteOlderThan returned error: %v", err)
+	}
+
+	traces, err := store.Query(ctx, QueryFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("Query returned error: %v", err)
+	}
+	if len(traces) != 2 {
+		t.Fatalf("expected 2 traces after age pruning, got %d", len(traces))
+	}
+
+	if err := store.TrimToCount(ctx, 1); err != nil {
+		t.Fatalf("TrimToCount returned error: %v", err)
+	}
+	traces, err = store.Query(ctx, QueryFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("Query returned error: %v", err)
+	}
+	if len(traces) != 1 {
+		t.Fatalf("expected 1 trace after count pruning, got %d", len(traces))
+	}
+
+	rule, err := store.UpsertAlertRule(ctx, AlertRule{
+		ID:            "rule-1",
+		Name:          "Error budget",
+		RuleType:      "error_rate",
+		Threshold:     5,
+		WindowMinutes: 15,
+		ServerName:    "demo-server",
+		Enabled:       true,
+	})
+	if err != nil {
+		t.Fatalf("UpsertAlertRule returned error: %v", err)
+	}
+	if rule.ID != "rule-1" {
+		t.Fatalf("id = %q", rule.ID)
+	}
+
+	rules, err := store.ListAlertRules(ctx)
+	if err != nil {
+		t.Fatalf("ListAlertRules returned error: %v", err)
+	}
+	if len(rules) != 1 || rules[0].Name != "Error budget" {
+		t.Fatalf("unexpected alert rules: %+v", rules)
+	}
+
+	if err := store.DeleteAlertRule(ctx, "rule-1"); err != nil {
+		t.Fatalf("DeleteAlertRule returned error: %v", err)
+	}
+	rules, err = store.ListAlertRules(ctx)
+	if err != nil {
+		t.Fatalf("ListAlertRules returned error: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Fatalf("expected no alert rules after deletion, got %+v", rules)
 	}
 }

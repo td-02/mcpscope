@@ -57,6 +57,15 @@
   padding: 0.75rem 0.9rem;
 }
 
+.controls input,
+.alert-form input,
+.alert-form select {
+  border: 1px solid rgba(64, 48, 34, 0.12);
+  border-radius: 0.9rem;
+  background: rgba(255, 252, 248, 0.94);
+  padding: 0.75rem 0.9rem;
+}
+
 .tabbar {
   display: inline-flex;
   gap: 0.5rem;
@@ -87,7 +96,7 @@
 
 .status-panel {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0.8rem;
   padding: 1rem;
   border: 1px solid rgba(64, 48, 34, 0.12);
@@ -122,6 +131,12 @@
   background: rgba(255, 252, 248, 0.94);
   overflow: hidden;
   box-shadow: 0 22px 55px rgba(76, 57, 39, 0.09);
+}
+
+.alerts-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
 }
 
 .table-header,
@@ -218,6 +233,26 @@ pre {
   padding: 1rem 1.25rem 1.25rem;
 }
 
+.alert-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid rgba(64, 48, 34, 0.08);
+}
+
+.alert-form label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.alert-form span {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: #8f7b69;
+}
+
 .timeline-item {
   border: 1px solid rgba(64, 48, 34, 0.08);
   border-radius: 1rem;
@@ -276,6 +311,11 @@ pre {
   color: #a33f1f;
 }
 
+.pill.neutral {
+  background: rgba(90, 83, 74, 0.12);
+  color: #6f6257;
+}
+
 .error-text {
   margin: 0.9rem 0 0;
   color: #9b3516;
@@ -292,6 +332,32 @@ pre {
   text-align: center;
 }
 
+.footer-actions {
+  display: flex;
+  justify-content: center;
+  padding: 1rem 1.25rem 1.25rem;
+}
+
+.load-more,
+.inline-action {
+  border: 0;
+  border-radius: 999px;
+  padding: 0.7rem 1rem;
+  background: #1f1b17;
+  color: #fff8f0;
+  cursor: pointer;
+}
+
+.load-more:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.inline-action {
+  background: rgba(31, 27, 23, 0.08);
+  color: #1f1b17;
+}
+
 @media (max-width: 960px) {
   .topbar {
     flex-direction: column;
@@ -303,6 +369,11 @@ pre {
   }
 
   .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .alerts-layout,
+  .alert-form {
     grid-template-columns: 1fr;
   }
 }

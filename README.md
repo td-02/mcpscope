@@ -25,6 +25,9 @@ Agents increasingly call MCP tools in production, but when something fails the e
 
 - Transparent proxy — zero config, works with stdio and HTTP MCP transports
 - Live web dashboard — tool call feed, P50/P95/P99 latency histograms, error rate timelines
+- Retention and pagination — age- and count-based cleanup with paginated trace browsing
+- Payload redaction — configurable JSON key masking before logs, storage, and UI display
+- Alert rules foundation — built-in latency P95 and error-rate rule evaluation
 - OpenTelemetry export — plugs into any existing Grafana or Jaeger setup
 - SQLite trace store — local by default, Postgres-ready via swappable backend interface
 - Schema snapshot + diff CLI — catch breaking tool changes before they reach production
@@ -46,6 +49,10 @@ mcpscope proxy --transport http --upstream-url http://127.0.0.1:8080 --db traces
 
 ```bash
 mcpscope proxy --transport stdio -- uv run server.py
+```
+
+```bash
+mcpscope proxy --retain-for 72h --max-traces 10000 --redact-key authorization --redact-key api_key -- uv run server.py
 ```
 
 ```text
@@ -118,6 +125,9 @@ examples/github-actions/mcp-schema-check.yml
 | `--db` |  | `mcpscope.db` | SQLite database path used for persisted traces. |
 | `--transport` |  | `stdio` | MCP transport mode for the proxy: `stdio` or `http`. |
 | `--otel` |  | `false` | Explicitly enables OpenTelemetry span export. |
+| `--retain-for` |  | `168h` | How long traces are kept before age-based cleanup runs. Use `0` to disable. |
+| `--max-traces` |  | `5000` | Maximum retained trace count before oldest traces are trimmed. Use `0` to disable. |
+| `--redact-key` |  | common secret fields | JSON field name to redact before logs, storage, and dashboard output. Repeatable. |
 |  | `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP gRPC endpoint for trace export; when unset, mcpscope falls back to a no-op exporter silently. |
 
 Both `proxy` and `snapshot` also accept launch commands after `--`, which is the preferred way to run servers that need arguments such as `uv run server.py` or `node server.js`.
