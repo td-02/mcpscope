@@ -1,0 +1,25 @@
+{
+  "environment": "prod",
+  "authToken": "replace-me",
+  "notification": {
+    "webhookUrls": [
+      "https://example.com/mcpscope-alerts"
+    ]
+  },
+  "proxy": {
+    "db": "/data/mcpscope.db",
+    "port": 4444,
+    "transport": "stdio",
+    "retainFor": "168h",
+    "maxTraces": 5000,
+    "redactKeys": [
+      "apiKey",
+      "api_key",
+      "authorization",
+      "token",
+      "secret",
+      "password"
+    ],
+    "otel": false
+  }
+}

@@ -20,6 +20,7 @@ type AlertRuleType = 'error_rate' | 'latency_p95'
 type TraceRecord = {
   id: string
   trace_id: string
+  environment: string
   server_name: string
   method: string
   params?: unknown
@@ -48,6 +49,7 @@ type LatencyStatRecord = {
 }
 
 type ErrorStatRecord = {
+  environment: string
   method: string
   count: number
   error_count: number
@@ -58,6 +60,7 @@ type ErrorStatRecord = {
 
 type AlertRule = {
   id: string
+  environment: string
   name: string
   rule_type: AlertRuleType
   threshold: number
@@ -81,6 +84,22 @@ type AlertEvaluation = {
   last_evaluated_at: string
 }
 
+type AlertEvent = {
+  id: string
+  rule_id: string
+  environment: string
+  rule_name: string
+  status: string
+  previous_status: string
+  current_value: number
+  threshold: number
+  sample_count: number
+  notification?: string
+  delivery_status?: string
+  delivery_error?: string
+  created_at: string
+}
+
 const windows: { value: WindowKey; label: string }[] = [
   { value: '5m', label: 'Last 5m' },
   { value: '30m', label: 'Last 30m' },
@@ -100,6 +119,8 @@ function App() {
   const [selectedServer, setSelectedServer] = useState<string>('')
   const [methodFilter, setMethodFilter] = useState<string>('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('')
+  const [environment, setEnvironment] = useState(() => readStoredValue('mcpscope.environment', 'default'))
+  const [authToken, setAuthToken] = useState(() => readStoredValue('mcpscope.authToken', ''))
 
   const [traces, setTraces] = useState<TraceRecord[]>([])
   const [traceOffset, setTraceOffset] = useState(0)
@@ -109,8 +130,10 @@ function App() {
   const [errorStats, setErrorStats] = useState<ErrorStatRecord[]>([])
   const [alertRules, setAlertRules] = useState<AlertRule[]>([])
   const [alertEvaluations, setAlertEvaluations] = useState<AlertEvaluation[]>([])
+  const [alertEvents, setAlertEvents] = useState<AlertEvent[]>([])
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [streamState, setStreamState] = useState<'connecting' | 'live' | 'closed'>('connecting')
+  const [errorMessage, setErrorMessage] = useState('')
   const [alertDraft, setAlertDraft] = useState({
     name: '',
     rule_type: 'error_rate' as AlertRuleType,
@@ -121,42 +144,56 @@ function App() {
   })
 
   useEffect(() => {
+    window.localStorage.setItem('mcpscope.environment', environment)
+  }, [environment])
+
+  useEffect(() => {
+    window.localStorage.setItem('mcpscope.authToken', authToken)
+  }, [authToken])
+
+  useEffect(() => {
     let active = true
 
     const loadTraces = async (offset = 0, append = false) => {
-      const response = await fetch(
-        `/api/traces${withQuery({
+      const response = await apiFetch(
+        apiURL('/api/traces', authToken, {
+          environment,
           server: selectedServer,
           method: methodFilter,
           status: statusFilter,
           limit: '50',
           offset: String(offset),
-        })}`,
+        }),
+        authToken,
       )
-      if (!response.ok) {
-        throw new Error(`failed to load traces: ${response.status}`)
-      }
-
       const data = (await response.json()) as TraceListResponse
       if (!active) {
         return
       }
 
+      setErrorMessage('')
       setTraceOffset(data.next_offset)
       setHasMoreTraces(data.has_more)
       setTraces((current) => (append ? [...current, ...data.items] : data.items))
     }
 
-    loadTraces().catch(() => {
-      if (active) {
-        setTraces([])
-        setTraceOffset(0)
-        setHasMoreTraces(false)
+    loadTraces().catch((error: unknown) => {
+      if (!active) {
+        return
       }
+      setErrorMessage(asErrorMessage(error))
+      setTraces([])
+      setTraceOffset(0)
+      setHasMoreTraces(false)
     })
 
     const source = new EventSource(
-      `/events${withQuery({ server: selectedServer, method: methodFilter, status: statusFilter })}`,
+      apiURL('/events', authToken, {
+        environment,
+        server: selectedServer,
+        method: methodFilter,
+        status: statusFilter,
+      }),
     )
     source.onopen = () => {
       if (active) {
@@ -184,56 +221,75 @@ function App() {
       active = false
       source.close()
     }
-  }, [selectedServer, methodFilter, statusFilter])
+  }, [authToken, environment, selectedServer, methodFilter, statusFilter])
 
   useEffect(() => {
     let active = true
 
     const loadPanels = async () => {
-      const [latencyResponse, errorResponse, ruleResponse, evaluationResponse] = await Promise.all([
-        fetch(`/api/stats/latency${withQuery({ window: windowKey, server: selectedServer, method: methodFilter })}`),
-        fetch(`/api/stats/errors${withQuery({ window: windowKey, server: selectedServer, method: methodFilter })}`),
-        fetch('/api/alerts/rules'),
-        fetch('/api/alerts/evaluations'),
-      ])
+      const [latencyResponse, errorResponse, ruleResponse, evaluationResponse, eventResponse] =
+        await Promise.all([
+          apiFetch(
+            apiURL('/api/stats/latency', authToken, {
+              environment,
+              window: windowKey,
+              server: selectedServer,
+              method: methodFilter,
+            }),
+            authToken,
+          ),
+          apiFetch(
+            apiURL('/api/stats/errors', authToken, {
+              environment,
+              window: windowKey,
+              server: selectedServer,
+              method: methodFilter,
+            }),
+            authToken,
+          ),
+          apiFetch(apiURL('/api/alerts/rules', authToken, { environment }), authToken),
+          apiFetch(apiURL('/api/alerts/evaluations', authToken, { environment }), authToken),
+          apiFetch(apiURL('/api/alerts/events', authToken, { environment }), authToken),
+        ])
 
-      if (!latencyResponse.ok || !errorResponse.ok || !ruleResponse.ok || !evaluationResponse.ok) {
-        throw new Error('failed to load dashboard data')
-      }
-
-      const [latencyData, errorData, rules, evaluations] = (await Promise.all([
+      const [latencyData, errorData, rules, evaluations, events] = (await Promise.all([
         latencyResponse.json(),
         errorResponse.json(),
         ruleResponse.json(),
         evaluationResponse.json(),
-      ])) as [LatencyStatRecord[], ErrorStatRecord[], AlertRule[], AlertEvaluation[]]
+        eventResponse.json(),
+      ])) as [LatencyStatRecord[], ErrorStatRecord[], AlertRule[], AlertEvaluation[], AlertEvent[]]
 
       if (!active) {
         return
       }
 
+      setErrorMessage('')
       setLatencyStats(latencyData)
       setErrorStats(errorData)
       setAlertRules(rules)
       setAlertEvaluations(evaluations)
+      setAlertEvents(events)
     }
 
-    loadPanels().catch(() => {
+    loadPanels().catch((error: unknown) => {
       if (!active) {
         return
       }
+      setErrorMessage(asErrorMessage(error))
       setLatencyStats([])
       setErrorStats([])
       setAlertRules([])
       setAlertEvaluations([])
+      setAlertEvents([])
     })
 
     const interval = window.setInterval(() => {
-      loadPanels().catch(() => {
+      loadPanels().catch((error: unknown) => {
         if (!active) {
           return
         }
-        setAlertEvaluations([])
+        setErrorMessage(asErrorMessage(error))
       })
     }, 10_000)
 
@@ -241,7 +297,7 @@ function App() {
       active = false
       window.clearInterval(interval)
     }
-  }, [selectedServer, windowKey, methodFilter])
+  }, [authToken, environment, selectedServer, windowKey, methodFilter])
 
   const stats = useMemo(() => {
     const total = traces.length
@@ -294,70 +350,92 @@ function App() {
   const loadMoreTraces = async () => {
     setLoadingMore(true)
     try {
-      const response = await fetch(
-        `/api/traces${withQuery({
+      const response = await apiFetch(
+        apiURL('/api/traces', authToken, {
+          environment,
           server: selectedServer,
           method: methodFilter,
           status: statusFilter,
           limit: '50',
           offset: String(traceOffset),
-        })}`,
+        }),
+        authToken,
       )
-      if (!response.ok) {
-        throw new Error('failed to load more traces')
-      }
       const data = (await response.json()) as TraceListResponse
+      setErrorMessage('')
       setTraceOffset(data.next_offset)
       setHasMoreTraces(data.has_more)
       setTraces((current) => [...current, ...data.items])
+    } catch (error) {
+      setErrorMessage(asErrorMessage(error))
     } finally {
       setLoadingMore(false)
     }
   }
 
-  const saveAlertRule = async () => {
-    const response = await fetch('/api/alerts/rules', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: alertDraft.name,
-        rule_type: alertDraft.rule_type,
-        threshold: Number(alertDraft.threshold),
-        window_minutes: Number(alertDraft.window_minutes),
-        server_name: alertDraft.server_name,
-        method: alertDraft.method,
-        enabled: true,
-      }),
-    })
-    if (!response.ok) {
-      return
-    }
-
-    setAlertDraft({
-      name: '',
-      rule_type: 'error_rate',
-      threshold: '5',
-      window_minutes: '15',
-      server_name: '',
-      method: '',
-    })
-
-    const [rulesResponse, evaluationsResponse] = await Promise.all([
-      fetch('/api/alerts/rules'),
-      fetch('/api/alerts/evaluations'),
+  const refreshAlerts = async () => {
+    const [rulesResponse, evaluationsResponse, eventsResponse] = await Promise.all([
+      apiFetch(apiURL('/api/alerts/rules', authToken, { environment }), authToken),
+      apiFetch(apiURL('/api/alerts/evaluations', authToken, { environment }), authToken),
+      apiFetch(apiURL('/api/alerts/events', authToken, { environment }), authToken),
     ])
+
     setAlertRules((await rulesResponse.json()) as AlertRule[])
     setAlertEvaluations((await evaluationsResponse.json()) as AlertEvaluation[])
+    setAlertEvents((await eventsResponse.json()) as AlertEvent[])
+  }
+
+  const saveAlertRule = async () => {
+    try {
+      const response = await apiFetch(apiURL('/api/alerts/rules', authToken, { environment }), authToken, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          environment,
+          name: alertDraft.name,
+          rule_type: alertDraft.rule_type,
+          threshold: Number(alertDraft.threshold),
+          window_minutes: Number(alertDraft.window_minutes),
+          server_name: alertDraft.server_name,
+          method: alertDraft.method,
+          enabled: true,
+        }),
+      })
+      if (!response.ok) {
+        throw new Error(`failed to save alert rule: ${response.status}`)
+      }
+
+      setAlertDraft({
+        name: '',
+        rule_type: 'error_rate',
+        threshold: '5',
+        window_minutes: '15',
+        server_name: '',
+        method: '',
+      })
+      setErrorMessage('')
+      await refreshAlerts()
+    } catch (error) {
+      setErrorMessage(asErrorMessage(error))
+    }
   }
 
   const deleteAlertRule = async (id: string) => {
-    const response = await fetch(`/api/alerts/rules${withQuery({ id })}`, { method: 'DELETE' })
-    if (!response.ok) {
-      return
-    }
+    try {
+      const response = await apiFetch(
+        apiURL('/api/alerts/rules', authToken, { environment, id }),
+        authToken,
+        { method: 'DELETE' },
+      )
+      if (!response.ok) {
+        throw new Error(`failed to delete alert rule: ${response.status}`)
+      }
 
-    setAlertRules((current) => current.filter((rule) => rule.id !== id))
-    setAlertEvaluations((current) => current.filter((rule) => rule.rule_id !== id))
+      setErrorMessage('')
+      await refreshAlerts()
+    } catch (error) {
+      setErrorMessage(asErrorMessage(error))
+    }
   }
 
   return (
@@ -369,6 +447,21 @@ function App() {
         </div>
 
         <div className="controls">
+          <label>
+            <span>Environment</span>
+            <input value={environment} onChange={(event) => setEnvironment(event.target.value || 'default')} />
+          </label>
+
+          <label>
+            <span>API Token</span>
+            <input
+              type="password"
+              value={authToken}
+              onChange={(event) => setAuthToken(event.target.value)}
+              placeholder="optional"
+            />
+          </label>
+
           <label>
             <span>Server</span>
             <select value={selectedServer} onChange={(event) => setSelectedServer(event.target.value)}>
@@ -382,7 +475,11 @@ function App() {
 
           <label>
             <span>Method</span>
-            <input value={methodFilter} onChange={(event) => setMethodFilter(event.target.value)} placeholder="tools/call" />
+            <input
+              value={methodFilter}
+              onChange={(event) => setMethodFilter(event.target.value)}
+              placeholder="tools/call"
+            />
           </label>
 
           <label>
@@ -409,6 +506,8 @@ function App() {
         </div>
       </nav>
 
+      {errorMessage ? <section className="error-banner">{errorMessage}</section> : null}
+
       <section className="tabbar">
         {tabs.map((tab) => (
           <button
@@ -424,6 +523,10 @@ function App() {
 
       <section className="hero">
         <div className="status-panel">
+          <div>
+            <span>Environment</span>
+            <strong>{environment || 'default'}</strong>
+          </div>
           <div>
             <span>Stream</span>
             <strong data-state={streamState}>{streamState}</strong>
@@ -449,17 +552,30 @@ function App() {
 
       {activeTab === 'traces' ? (
         <section className="table-card">
-          <div className="table-header">
+          <div className="table-header table-header-actions">
             <div>
               <h2>Recent tool calls</h2>
               <p>Traces are paginated, retained by policy, and already redacted before they reach the UI.</p>
             </div>
+            <a
+              className="load-more export-link"
+              href={apiURL('/api/export/traces', authToken, {
+                environment,
+                server: selectedServer,
+                method: methodFilter,
+                status: statusFilter,
+                limit: '200',
+              })}
+            >
+              Export JSON
+            </a>
           </div>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>Timestamp</th>
+                  <th>Environment</th>
                   <th>Server</th>
                   <th>Method</th>
                   <th>Latency</th>
@@ -469,7 +585,7 @@ function App() {
               <tbody>
                 {traces.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="empty">
+                    <td colSpan={6} className="empty">
                       No traces yet. Start calling tools through the proxy to populate the feed.
                     </td>
                   </tr>
@@ -485,6 +601,7 @@ function App() {
                           }
                         >
                           <td>{formatTimestamp(trace.created_at)}</td>
+                          <td>{trace.environment}</td>
                           <td>{trace.server_name}</td>
                           <td>{trace.method || '(response)'}</td>
                           <td>{trace.latency_ms} ms</td>
@@ -496,7 +613,7 @@ function App() {
                         </tr>
                         {expanded ? (
                           <tr className="detail-row">
-                            <td colSpan={5}>
+                            <td colSpan={6}>
                               <div className="detail-grid">
                                 <div>
                                   <h3>Params</h3>
@@ -573,7 +690,7 @@ function App() {
           ) : (
             <div className="timeline">
               {errorStats.map((item) => (
-                <article key={item.method} className="timeline-item">
+                <article key={`${item.environment}:${item.method}`} className="timeline-item">
                   <div className="timeline-top">
                     <div>
                       <h3>{item.method}</h3>
@@ -600,36 +717,65 @@ function App() {
             <div className="panel-header">
               <div>
                 <h2>Alert Rules</h2>
-                <p>Start with simple latency and error-rate thresholds before adding external notifiers.</p>
+                <p>Thresholds are scoped to the active environment and can notify configured webhooks.</p>
               </div>
             </div>
             <div className="alert-form">
               <label>
                 <span>Name</span>
-                <input value={alertDraft.name} onChange={(event) => setAlertDraft((current) => ({ ...current, name: event.target.value }))} />
+                <input
+                  value={alertDraft.name}
+                  onChange={(event) => setAlertDraft((current) => ({ ...current, name: event.target.value }))}
+                />
               </label>
               <label>
                 <span>Type</span>
-                <select value={alertDraft.rule_type} onChange={(event) => setAlertDraft((current) => ({ ...current, rule_type: event.target.value as AlertRuleType }))}>
+                <select
+                  value={alertDraft.rule_type}
+                  onChange={(event) =>
+                    setAlertDraft((current) => ({
+                      ...current,
+                      rule_type: event.target.value as AlertRuleType,
+                    }))
+                  }
+                >
                   <option value="error_rate">Error Rate %</option>
                   <option value="latency_p95">Latency P95 ms</option>
                 </select>
               </label>
               <label>
                 <span>Threshold</span>
-                <input value={alertDraft.threshold} onChange={(event) => setAlertDraft((current) => ({ ...current, threshold: event.target.value }))} />
+                <input
+                  value={alertDraft.threshold}
+                  onChange={(event) => setAlertDraft((current) => ({ ...current, threshold: event.target.value }))}
+                />
               </label>
               <label>
                 <span>Window Minutes</span>
-                <input value={alertDraft.window_minutes} onChange={(event) => setAlertDraft((current) => ({ ...current, window_minutes: event.target.value }))} />
+                <input
+                  value={alertDraft.window_minutes}
+                  onChange={(event) =>
+                    setAlertDraft((current) => ({ ...current, window_minutes: event.target.value }))
+                  }
+                />
               </label>
               <label>
                 <span>Server</span>
-                <input value={alertDraft.server_name} onChange={(event) => setAlertDraft((current) => ({ ...current, server_name: event.target.value }))} placeholder="optional" />
+                <input
+                  value={alertDraft.server_name}
+                  onChange={(event) =>
+                    setAlertDraft((current) => ({ ...current, server_name: event.target.value }))
+                  }
+                  placeholder="optional"
+                />
               </label>
               <label>
                 <span>Method</span>
-                <input value={alertDraft.method} onChange={(event) => setAlertDraft((current) => ({ ...current, method: event.target.value }))} placeholder="optional" />
+                <input
+                  value={alertDraft.method}
+                  onChange={(event) => setAlertDraft((current) => ({ ...current, method: event.target.value }))}
+                  placeholder="optional"
+                />
               </label>
               <button type="button" className="load-more" onClick={saveAlertRule}>
                 Save Rule
@@ -652,7 +798,8 @@ function App() {
                       </button>
                     </div>
                     <p className="timeline-meta">
-                      {rule.window_minutes}m {rule.server_name ? `• ${rule.server_name}` : ''} {rule.method ? `• ${rule.method}` : ''}
+                      {rule.window_minutes}m {rule.server_name ? `| ${rule.server_name}` : ''}{' '}
+                      {rule.method ? `| ${rule.method}` : ''}
                     </p>
                   </article>
                 ))
@@ -663,8 +810,8 @@ function App() {
           <section className="panel-card">
             <div className="panel-header">
               <div>
-                <h2>Alert Evaluations</h2>
-                <p>Rules are evaluated live against the retained trace window.</p>
+                <h2>Alert Activity</h2>
+                <p>Live evaluations and persisted state changes for notifications and incident review.</p>
               </div>
             </div>
             <div className="timeline">
@@ -686,8 +833,40 @@ function App() {
                       Current {item.current_value.toFixed(1)} vs threshold {item.threshold.toFixed(1)}
                     </p>
                     <p className="timeline-meta">
-                      {item.sample_count} traces evaluated {item.last_evaluated_at ? `• ${formatTimestamp(item.last_evaluated_at)}` : ''}
+                      {item.sample_count} traces evaluated
+                      {item.last_evaluated_at ? ` | ${formatTimestamp(item.last_evaluated_at)}` : ''}
                     </p>
+                  </article>
+                ))
+              )}
+            </div>
+
+            <div className="timeline timeline-secondary">
+              <h3 className="subsection-title">Recent transitions</h3>
+              {alertEvents.length === 0 ? (
+                <p className="empty-block">No alert events recorded yet.</p>
+              ) : (
+                alertEvents.map((item) => (
+                  <article key={item.id} className="timeline-item">
+                    <div className="timeline-top">
+                      <div>
+                        <h3>{item.rule_name}</h3>
+                        <p>
+                          {item.previous_status || 'new'} to {item.status}
+                        </p>
+                      </div>
+                      <span className={statusPillClass(item.status as AlertEvaluation['status'])}>
+                        {item.delivery_status || 'stored'}
+                      </span>
+                    </div>
+                    <p className="timeline-message">
+                      Value {item.current_value.toFixed(1)} vs threshold {item.threshold.toFixed(1)}
+                    </p>
+                    <p className="timeline-meta">
+                      {item.sample_count} traces | {formatTimestamp(item.created_at)}
+                      {item.notification ? ` | ${item.notification}` : ''}
+                    </p>
+                    {item.delivery_error ? <p className="error-text">Delivery: {item.delivery_error}</p> : null}
                   </article>
                 ))
               )}
@@ -697,6 +876,38 @@ function App() {
       ) : null}
     </main>
   )
+}
+
+function readStoredValue(key: string, fallback: string) {
+  const value = window.localStorage.getItem(key)
+  return value && value.trim() !== '' ? value : fallback
+}
+
+async function apiFetch(input: string, authToken: string, init?: RequestInit) {
+  const headers = new Headers(init?.headers)
+  if (authToken.trim() !== '') {
+    headers.set('Authorization', `Bearer ${authToken.trim()}`)
+  }
+
+  const response = await fetch(input, {
+    ...init,
+    headers,
+  })
+  if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error('dashboard authentication failed; update the API token')
+    }
+    throw new Error(`request failed with status ${response.status}`)
+  }
+  return response
+}
+
+function apiURL(path: string, authToken: string, params: Record<string, string>) {
+  const query = withQuery({
+    ...params,
+    token: authToken.trim() !== '' ? authToken.trim() : '',
+  })
+  return `${path}${query}`
 }
 
 function withQuery(params: Record<string, string>) {
@@ -730,6 +941,13 @@ function statusPillClass(status: AlertEvaluation['status']) {
     return 'pill success'
   }
   return 'pill neutral'
+}
+
+function asErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message
+  }
+  return 'request failed'
 }
 
 export default App

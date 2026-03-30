@@ -6,22 +6,18 @@ services:
     entrypoint:
       - /mcpscope
     command:
+      - --config
+      - /config/mcpscope.json
       - proxy
-      - --server
+      - --
       - /mcp-server
-      - --port
-      - "4444"
-      - --transport
-      - "${MCPSCOPE_TRANSPORT:-stdio}"
-      - --db
-      - /data/mcpscope.db
-      - --otel
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
     ports:
       - "4444:4444"
     volumes:
       - mcpscope-sqlite:/data
+      - "${MCPSCOPE_CONFIG_PATH:-./mcpscope.example.json}:/config/mcpscope.json:ro"
       - "${MCP_SERVER_PATH:?Set MCP_SERVER_PATH to a Linux MCP server binary}:/mcp-server:ro"
 
   jaeger:

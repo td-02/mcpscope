@@ -66,6 +66,15 @@
   padding: 0.75rem 0.9rem;
 }
 
+.error-banner {
+  margin-bottom: 1rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid rgba(171, 67, 26, 0.16);
+  border-radius: 1rem;
+  background: rgba(171, 67, 26, 0.08);
+  color: #8f2c11;
+}
+
 .tabbar {
   display: inline-flex;
   gap: 0.5rem;
@@ -96,7 +105,7 @@
 
 .status-panel {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 0.8rem;
   padding: 1rem;
   border: 1px solid rgba(64, 48, 34, 0.12);
@@ -143,6 +152,13 @@
 .panel-header {
   padding: 1.25rem 1.25rem 1rem;
   border-bottom: 1px solid rgba(64, 48, 34, 0.08);
+}
+
+.table-header-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
 }
 
 .table-header h2,
@@ -233,6 +249,10 @@ pre {
   padding: 1rem 1.25rem 1.25rem;
 }
 
+.timeline-secondary {
+  border-top: 1px solid rgba(64, 48, 34, 0.08);
+}
+
 .alert-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -269,6 +289,14 @@ pre {
 
 .timeline-top h3 {
   margin: 0 0 0.25rem;
+}
+
+.subsection-title {
+  margin: 0;
+  font-size: 0.92rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #7c6a5a;
 }
 
 .timeline-top p,
@@ -340,12 +368,16 @@ pre {
 
 .load-more,
 .inline-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 0;
   border-radius: 999px;
   padding: 0.7rem 1rem;
   background: #1f1b17;
   color: #fff8f0;
   cursor: pointer;
+  text-decoration: none;
 }
 
 .load-more:disabled {
@@ -366,6 +398,11 @@ pre {
 
   .status-panel {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .table-header-actions {
+    flex-direction: column;
+    align-items: start;
   }
 
   .detail-grid {
