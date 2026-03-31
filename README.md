@@ -1,6 +1,6 @@
 # mcpscope
 
-Open source observability for MCP servers.
+Open source MCP observability: proxy traffic, inspect traces, replay calls, diff schemas, and alert on failures.
 
 ![mcpscope demo](demo/mcp_observer_demo.gif)
 
