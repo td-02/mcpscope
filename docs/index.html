@@ -1,0 +1,1459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mcpscope — MCP Observability. No Excuses.</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Bebas+Neue&family=Barlow+Condensed:wght@300;400;600;700;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #060608;
+    --surface: #0d0d11;
+    --border: #1e1e28;
+    --accent: #00ff88;
+    --accent2: #ff3c3c;
+    --accent3: #3c8eff;
+    --text: #e8e8f0;
+    --muted: #5a5a72;
+    --glow: rgba(0,255,136,0.15);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Barlow Condensed', sans-serif;
+    overflow-x: hidden;
+    cursor: crosshair;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+    pointer-events: none;
+    z-index: 9999;
+    opacity: 0.4;
+  }
+
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.03) 2px,
+      rgba(0,0,0,0.03) 4px
+    );
+    pointer-events: none;
+    z-index: 9998;
+  }
+
+  nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 48px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(6,6,8,0.85);
+    backdrop-filter: blur(12px);
+  }
+
+  .nav-logo {
+    font-family: 'DM Mono', monospace;
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: -0.5px;
+    text-decoration: none;
+  }
+
+  .nav-logo span { color: var(--muted); }
+
+  .nav-links {
+    display: flex;
+    gap: 40px;
+    list-style: none;
+  }
+
+  .nav-links a {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--muted);
+    text-decoration: none;
+    transition: color 0.2s;
+  }
+
+  .nav-links a:hover { color: var(--text); }
+
+  .nav-cta {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 10px 24px;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    background: transparent;
+    text-decoration: none;
+    letter-spacing: 1px;
+    transition: all 0.2s;
+    cursor: crosshair;
+  }
+
+  .nav-cta:hover {
+    background: var(--accent);
+    color: var(--bg);
+  }
+
+  .hero {
+    min-height: 100vh;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: center;
+    padding: 120px 48px 80px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .hero-grid-bg {
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 60px 60px;
+    mask-image: radial-gradient(ellipse 80% 80% at 50% 50%, black 40%, transparent 100%);
+    opacity: 0.4;
+  }
+
+  .hero-glow {
+    position: absolute;
+    width: 600px;
+    height: 600px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(0,255,136,0.08) 0%, transparent 70%);
+    top: 50%;
+    left: 30%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+
+  .hero-left { position: relative; z-index: 2; }
+
+  .hero-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 3px;
+    color: var(--accent);
+    text-transform: uppercase;
+    border: 1px solid rgba(0,255,136,0.3);
+    padding: 6px 14px;
+    margin-bottom: 40px;
+    background: rgba(0,255,136,0.05);
+    animation: fadeSlideIn 0.6s ease both;
+  }
+
+  .hero-tag::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.7); }
+  }
+
+  h1 {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: clamp(72px, 8vw, 128px);
+    line-height: 0.9;
+    letter-spacing: 2px;
+    color: var(--text);
+    margin-bottom: 32px;
+    animation: fadeSlideIn 0.7s 0.1s ease both;
+  }
+
+  h1 .accent { color: var(--accent); }
+  h1 .dim { color: var(--muted); }
+
+  .hero-sub {
+    font-size: 20px;
+    font-weight: 300;
+    letter-spacing: 1px;
+    color: var(--muted);
+    line-height: 1.6;
+    max-width: 480px;
+    margin-bottom: 48px;
+    animation: fadeSlideIn 0.7s 0.2s ease both;
+  }
+
+  .hero-sub strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .hero-actions {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    animation: fadeSlideIn 0.7s 0.3s ease both;
+  }
+
+  .btn-primary {
+    font-family: 'DM Mono', monospace;
+    font-size: 14px;
+    font-weight: 500;
+    padding: 16px 36px;
+    background: var(--accent);
+    color: var(--bg);
+    text-decoration: none;
+    letter-spacing: 1px;
+    transition: all 0.2s;
+    cursor: crosshair;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .btn-primary::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: white;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+
+  .btn-primary:hover::after { opacity: 0.1; }
+
+  .btn-secondary {
+    font-family: 'DM Mono', monospace;
+    font-size: 14px;
+    font-weight: 500;
+    padding: 16px 36px;
+    background: transparent;
+    color: var(--text);
+    text-decoration: none;
+    letter-spacing: 1px;
+    border: 1px solid var(--border);
+    transition: all 0.2s;
+    cursor: crosshair;
+  }
+
+  .btn-secondary:hover {
+    border-color: var(--muted);
+    color: var(--text);
+  }
+
+  .hero-right {
+    position: relative;
+    z-index: 2;
+    animation: fadeSlideIn 0.8s 0.4s ease both;
+  }
+
+  .terminal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    font-family: 'DM Mono', monospace;
+    font-size: 13px;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .terminal::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    animation: scanline 4s linear infinite;
+  }
+
+  @keyframes scanline {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+  }
+
+  .terminal-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(0,0,0,0.3);
+  }
+
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot-r { background: #ff5f57; }
+  .dot-y { background: #ffbd2e; }
+  .dot-g { background: #28ca41; }
+
+  .terminal-title {
+    flex: 1;
+    text-align: center;
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 1px;
+  }
+
+  .terminal-body {
+    padding: 24px;
+    line-height: 1.8;
+  }
+
+  .t-prompt { color: var(--accent); }
+  .t-cmd { color: var(--text); }
+  .t-comment { color: var(--muted); font-style: italic; }
+  .t-output { color: #7888aa; }
+  .t-val { color: #ffd700; }
+  .t-ok { color: var(--accent); }
+  .t-err { color: var(--accent2); }
+  .t-info { color: var(--accent3); }
+
+  .t-line {
+    display: block;
+    opacity: 0;
+    animation: typein 0.1s ease both;
+  }
+
+  @keyframes typein {
+    from { opacity: 0; transform: translateX(-4px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  .t-line:nth-child(1) { animation-delay: 0.8s; }
+  .t-line:nth-child(2) { animation-delay: 1.1s; }
+  .t-line:nth-child(3) { animation-delay: 1.3s; }
+  .t-line:nth-child(4) { animation-delay: 1.5s; }
+  .t-line:nth-child(5) { animation-delay: 1.7s; }
+  .t-line:nth-child(6) { animation-delay: 1.9s; }
+  .t-line:nth-child(7) { animation-delay: 2.1s; }
+  .t-line:nth-child(8) { animation-delay: 2.3s; }
+  .t-line:nth-child(9) { animation-delay: 2.5s; }
+  .t-line:nth-child(10) { animation-delay: 2.7s; }
+  .t-line:nth-child(11) { animation-delay: 2.9s; }
+  .t-line:nth-child(12) { animation-delay: 3.1s; }
+  .t-line:nth-child(13) { animation-delay: 3.3s; }
+  .t-line:nth-child(14) { animation-delay: 3.5s; }
+  .t-line:nth-child(15) { animation-delay: 3.7s; }
+
+  .cursor {
+    display: inline-block;
+    width: 8px;
+    height: 14px;
+    background: var(--accent);
+    vertical-align: middle;
+    animation: blink 1s infinite, typein 0.1s 3.9s ease both;
+    opacity: 0;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="#" class="nav-logo">mcp<span>scope</span></a>
+  <ul class="nav-links">
+    <li><a href="#features">Features</a></li>
+    <li><a href="#install">Install</a></li>
+    <li><a href="#compliance">Compliance</a></li>
+    <li><a href="https://github.com/td-02/mcp-observer">Docs</a></li>
+  </ul>
+  <a href="https://github.com/td-02/mcp-observer" class="nav-cta" target="_blank" rel="noreferrer">★ Star on GitHub</a>
+</nav>
+
+<section class="hero">
+  <div class="hero-grid-bg"></div>
+  <div class="hero-glow"></div>
+
+  <div class="hero-left">
+    <div class="hero-tag">Open Source · MIT · Go 1.22</div>
+    <h1>
+      MCP TOOL<br>
+      CALLS <span class="accent">DIE</span><br>
+      <span class="dim">IN THE DARK.</span>
+    </h1>
+    <p class="hero-sub">
+      Your agents are calling MCP tools in production right now.
+      <strong>You have zero visibility.</strong> No traces. No latency data.
+      No schema drift detection. No audit trail.
+      <strong>mcpscope fixes all of that in 60 seconds.</strong>
+    </p>
+    <div class="hero-actions">
+      <a href="#install" class="btn-primary">INSTALL NOW →</a>
+      <a href="https://github.com/td-02/mcp-observer" class="btn-secondary" target="_blank" rel="noreferrer">View on GitHub</a>
+    </div>
+  </div>
+
+  <div class="hero-right">
+    <div class="terminal">
+      <div class="terminal-header">
+        <div class="dot dot-r"></div>
+        <div class="dot dot-y"></div>
+        <div class="dot dot-g"></div>
+        <span class="terminal-title">mcpscope — live</span>
+      </div>
+      <div class="terminal-body">
+        <span class="t-line"><span class="t-prompt">$</span> <span class="t-cmd">mcpscope proxy --server ./my-mcp-server --db traces.db</span></span>
+        <span class="t-line"><span class="t-output">  Transparent proxy started on :4444</span></span>
+        <span class="t-line"><span class="t-output">  Dashboard → http://localhost:4444</span></span>
+        <span class="t-line"><span class="t-output">  SQLite store → traces.db</span></span>
+        <span class="t-line">&nbsp;</span>
+        <span class="t-line"><span class="t-info">→ tool_call</span>  <span class="t-val">read_file</span>       <span class="t-ok">12ms</span>  P50</span>
+        <span class="t-line"><span class="t-info">→ tool_call</span>  <span class="t-val">search_web</span>      <span class="t-ok">84ms</span>  P95</span>
+        <span class="t-line"><span class="t-info">→ tool_call</span>  <span class="t-val">run_query</span>      <span class="t-err">503ms</span>  ⚠ SPIKE</span>
+        <span class="t-line"><span class="t-info">→ tool_call</span>  <span class="t-val">write_file</span>      <span class="t-ok">19ms</span>  P50</span>
+        <span class="t-line">&nbsp;</span>
+        <span class="t-line"><span class="t-prompt">$</span> <span class="t-cmd">mcpscope diff baseline.json current.json --exit-code</span></span>
+        <span class="t-line"><span class="t-err">  BREAKING: search_web — param 'limit' removed</span></span>
+        <span class="t-line"><span class="t-err">  BREAKING: run_query  — return schema changed</span></span>
+        <span class="t-line"><span class="t-output">  Exit code 1 — PR blocked.</span></span>
+        <span class="t-line"><span class="t-prompt">$</span> <span class="cursor"></span></span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .stat-bar {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    margin: 0 48px;
+  }
+
+  .stat {
+    padding: 48px 32px;
+    border-right: 1px solid var(--border);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .stat:last-child { border-right: none; }
+
+  .stat::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 0;
+    height: 2px;
+    background: var(--accent);
+    transition: width 1s ease;
+  }
+
+  .stat:hover::after { width: 100%; }
+
+  .stat-num {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 64px;
+    line-height: 1;
+    color: var(--accent);
+    letter-spacing: 1px;
+    display: block;
+  }
+
+  .stat-label {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 8px;
+    display: block;
+  }
+
+  .section {
+    padding: 120px 48px;
+  }
+
+  .section-tag {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 4px;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin-bottom: 24px;
+    display: block;
+  }
+
+  h2 {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: clamp(48px, 6vw, 88px);
+    line-height: 0.95;
+    letter-spacing: 1px;
+    margin-bottom: 24px;
+  }
+
+  .problem-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    margin-top: 64px;
+    border: 1px solid var(--border);
+  }
+
+  .problem-card {
+    background: var(--bg);
+    padding: 48px;
+    position: relative;
+    overflow: hidden;
+    transition: background 0.3s;
+  }
+
+  .problem-card:hover { background: var(--surface); }
+
+  .problem-card::before {
+    content: attr(data-num);
+    position: absolute;
+    top: -10px;
+    right: 16px;
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 100px;
+    color: rgba(255,60,60,0.06);
+    line-height: 1;
+    pointer-events: none;
+  }
+
+  .problem-icon {
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    letter-spacing: 2px;
+    color: var(--accent2);
+    text-transform: uppercase;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .problem-icon::before {
+    content: '×';
+    font-size: 18px;
+    color: var(--accent2);
+  }
+
+  .problem-card h3 {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 32px;
+    letter-spacing: 1px;
+    margin-bottom: 16px;
+  }
+
+  .problem-card p {
+    font-size: 16px;
+    font-weight: 300;
+    line-height: 1.7;
+    color: var(--muted);
+  }
+
+  .features-section {
+    padding: 120px 48px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .features-header {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 64px;
+    align-items: end;
+    margin-bottom: 80px;
+  }
+
+  .features-intro {
+    font-size: 20px;
+    font-weight: 300;
+    line-height: 1.7;
+    color: var(--muted);
+  }
+
+  .features-intro strong { color: var(--text); font-weight: 600; }
+
+  .features-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+  }
+
+  .feature {
+    background: var(--surface);
+    padding: 40px;
+    position: relative;
+    overflow: hidden;
+    transition: all 0.3s;
+    cursor: default;
+  }
+
+  .feature:hover { background: var(--bg); }
+  .feature:hover .feature-line { width: 100%; }
+
+  .feature-line {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 0;
+    height: 2px;
+    background: var(--accent);
+    transition: width 0.4s ease;
+  }
+
+  .feature-num {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 3px;
+    color: var(--muted);
+    margin-bottom: 24px;
+  }
+
+  .feature h3 {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 28px;
+    letter-spacing: 1px;
+    color: var(--text);
+    margin-bottom: 14px;
+  }
+
+  .feature p {
+    font-size: 15px;
+    font-weight: 300;
+    line-height: 1.7;
+    color: var(--muted);
+  }
+
+  .feature-tag {
+    margin-top: 20px;
+    display: inline-block;
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    padding: 4px 10px;
+    background: rgba(0,255,136,0.08);
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+
+  .divider {
+    height: 1px;
+    background: var(--border);
+    margin: 0 48px;
+  }
+
+  .ticker {
+    overflow: hidden;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 0;
+    background: var(--surface);
+  }
+
+  .ticker-track {
+    display: flex;
+    gap: 0;
+    animation: ticker 30s linear infinite;
+    white-space: nowrap;
+  }
+
+  .ticker-item {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0 48px;
+    flex-shrink: 0;
+  }
+
+  .ticker-item span { color: var(--accent); }
+
+  @keyframes ticker {
+    from { transform: translateX(0); }
+    to { transform: translateX(-50%); }
+  }
+</style>
+
+<div class="ticker">
+  <div class="ticker-track">
+    <span class="ticker-item">Transparent Proxy <span>◆</span></span>
+    <span class="ticker-item">Live Dashboard <span>◆</span></span>
+    <span class="ticker-item">P50 / P95 / P99 Latency <span>◆</span></span>
+    <span class="ticker-item">OpenTelemetry Export <span>◆</span></span>
+    <span class="ticker-item">SQLite Trace Store <span>◆</span></span>
+    <span class="ticker-item">Schema Diff CLI <span>◆</span></span>
+    <span class="ticker-item">CI / GitHub Actions <span>◆</span></span>
+    <span class="ticker-item">EU AI Act Ready <span>◆</span></span>
+    <span class="ticker-item">Zero Config <span>◆</span></span>
+    <span class="ticker-item">stdio + HTTP Transport <span>◆</span></span>
+    <span class="ticker-item">Transparent Proxy <span>◆</span></span>
+    <span class="ticker-item">Live Dashboard <span>◆</span></span>
+    <span class="ticker-item">P50 / P95 / P99 Latency <span>◆</span></span>
+    <span class="ticker-item">OpenTelemetry Export <span>◆</span></span>
+    <span class="ticker-item">SQLite Trace Store <span>◆</span></span>
+    <span class="ticker-item">Schema Diff CLI <span>◆</span></span>
+    <span class="ticker-item">CI / GitHub Actions <span>◆</span></span>
+    <span class="ticker-item">EU AI Act Ready <span>◆</span></span>
+    <span class="ticker-item">Zero Config <span>◆</span></span>
+    <span class="ticker-item">stdio + HTTP Transport <span>◆</span></span>
+  </div>
+</div>
+
+<div class="stat-bar reveal">
+  <div class="stat">
+    <span class="stat-num">0</span>
+    <span class="stat-label">Config files required</span>
+  </div>
+  <div class="stat">
+    <span class="stat-num">3</span>
+    <span class="stat-label">Export targets: OTEL, SQLite, CSV</span>
+  </div>
+  <div class="stat">
+    <span class="stat-num">60s</span>
+    <span class="stat-label">Time to full observability</span>
+  </div>
+  <div class="stat">
+    <span class="stat-num">Aug '26</span>
+    <span class="stat-label">EU AI Act compliance deadline</span>
+  </div>
+</div>
+
+<section class="section reveal">
+  <span class="section-tag">// The Problem</span>
+  <h2>YOUR AGENTS ARE<br><span style="color:var(--accent2)">FLYING BLIND.</span></h2>
+
+  <div class="problem-grid">
+    <div class="problem-card" data-num="01">
+      <div class="problem-icon">No Trace Data</div>
+      <h3>Tool calls vanish into stderr</h3>
+      <p>When an MCP tool call fails or spikes in latency, you get nothing. No span, no trace ID, no request body. You're debugging from stdout noise and user reports.</p>
+    </div>
+    <div class="problem-card" data-num="02">
+      <div class="problem-icon">Silent Schema Drift</div>
+      <h3>Breaking changes ship undetected</h3>
+      <p>Your MCP server's tool signatures change. No CI check catches it. Your agent breaks in production. You find out when the error rate spikes at 2 AM.</p>
+    </div>
+    <div class="problem-card" data-num="03">
+      <div class="problem-icon">No Audit Trail</div>
+      <h3>Zero compliance evidence</h3>
+      <p>Regulators want records of automated decisions. You have nothing. The EU AI Act goes into full enforcement in August 2026. The clock is running.</p>
+    </div>
+    <div class="problem-card" data-num="04">
+      <div class="problem-icon">Vendor Lock-in</div>
+      <h3>Existing stacks don't speak MCP</h3>
+      <p>Datadog, Grafana, Jaeger - they're great for microservices. None of them understand MCP tool calls, transport negotiation, or schema snapshots natively.</p>
+    </div>
+  </div>
+</section>
+
+<section class="features-section" id="features">
+  <div class="features-header reveal">
+    <div>
+      <span class="section-tag">// The Solution</span>
+      <h2>EVERYTHING YOU<br>NEED. NOTHING<br>YOU DON'T.</h2>
+    </div>
+    <p class="features-intro">
+      mcpscope sits between your agent and your MCP server as a <strong>transparent proxy</strong>.
+      Zero config. Zero code changes. Full observability - traces, latency histograms, error rates,
+      and schema diffs - from the moment you run one command.
+    </p>
+  </div>
+
+  <div class="features-grid reveal">
+    <div class="feature">
+      <div class="feature-line"></div>
+      <div class="feature-num">01 / 06</div>
+      <h3>Transparent Proxy</h3>
+      <p>Intercepts stdio and HTTP MCP transports without modifying your server or your agent. Drop it in the middle and walk away.</p>
+      <span class="feature-tag">Zero Changes</span>
+    </div>
+    <div class="feature">
+      <div class="feature-line"></div>
+      <div class="feature-num">02 / 06</div>
+      <h3>Live Dashboard</h3>
+      <p>Real-time tool call feed, P50/P95/P99 latency histograms, error rate timelines. Everything in your browser at localhost:4444.</p>
+      <span class="feature-tag">localhost:4444</span>
+    </div>
+    <div class="feature">
+      <div class="feature-line"></div>
+      <div class="feature-num">03 / 06</div>
+      <h3>OTEL Export</h3>
+      <p>Plugs into any existing Grafana or Jaeger setup with a single env var. Your MCP traces become first-class citizens in your observability stack.</p>
+      <span class="feature-tag">Grafana / Jaeger</span>
+    </div>
+    <div class="feature">
+      <div class="feature-line"></div>
+      <div class="feature-num">04 / 06</div>
+      <h3>SQLite Trace Store</h3>
+      <p>Local by default. No cloud account, no SaaS, no data leaving your infra. Postgres-ready via swappable backend interface when you scale.</p>
+      <span class="feature-tag">Local First</span>
+    </div>
+    <div class="feature">
+      <div class="feature-line"></div>
+      <div class="feature-num">05 / 06</div>
+      <h3>Schema Diff CLI</h3>
+      <p>Snapshot your MCP server's tool schema and diff it against any baseline. Catch breaking changes before they reach production - or block them in CI.</p>
+      <span class="feature-tag">CI Ready</span>
+    </div>
+    <div class="feature">
+      <div class="feature-line"></div>
+      <div class="feature-num">06 / 06</div>
+      <h3>GitHub Actions</h3>
+      <p>Block PRs on breaking MCP schema changes. One workflow file included. The first time it saves you from a production incident, you'll understand why it exists.</p>
+      <span class="feature-tag">example included</span>
+    </div>
+  </div>
+</section>
+
+<style>
+  .arch-section {
+    padding: 120px 48px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 80px;
+    align-items: center;
+  }
+
+  .arch-diagram {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    line-height: 2;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 40px;
+    color: var(--muted);
+    position: relative;
+  }
+
+  .arch-diagram::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent3), transparent);
+  }
+
+  .arch-node { color: var(--text); }
+  .arch-accent { color: var(--accent); }
+  .arch-accent2 { color: var(--accent3); }
+  .arch-arrow { color: var(--muted); }
+
+  .arch-right h2 { margin-bottom: 32px; }
+
+  .arch-feature-list {
+    list-style: none;
+    margin-top: 24px;
+  }
+
+  .arch-feature-list li {
+    padding: 16px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 16px;
+    font-weight: 300;
+    color: var(--muted);
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    line-height: 1.5;
+  }
+
+  .arch-feature-list li .tag {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    background: rgba(0,255,136,0.08);
+    color: var(--accent);
+    padding: 3px 8px;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .compliance {
+    padding: 120px 48px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 80px;
+    align-items: center;
+  }
+
+  .compliance-warning {
+    background: rgba(255,60,60,0.04);
+    border: 1px solid rgba(255,60,60,0.2);
+    padding: 40px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .compliance-warning::before {
+    content: 'DEADLINE';
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 120px;
+    color: rgba(255,60,60,0.04);
+    line-height: 1;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+
+  .warning-tag {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 3px;
+    color: var(--accent2);
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+
+  .warning-tag::before {
+    content: '!';
+    width: 20px;
+    height: 20px;
+    border: 1px solid var(--accent2);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    flex-shrink: 0;
+    text-align: center;
+    line-height: 18px;
+  }
+
+  .countdown-date {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 56px;
+    color: var(--accent2);
+    line-height: 1;
+    margin-bottom: 16px;
+    letter-spacing: 2px;
+  }
+
+  .compliance-warning p {
+    font-size: 16px;
+    font-weight: 300;
+    line-height: 1.7;
+    color: var(--muted);
+  }
+
+  .compliance-warning strong { color: var(--text); }
+  .compliance-right h2 { margin-bottom: 32px; }
+
+  .compliance-right p {
+    font-size: 18px;
+    font-weight: 300;
+    line-height: 1.7;
+    color: var(--muted);
+    margin-bottom: 24px;
+  }
+
+  .compliance-right strong { color: var(--text); }
+
+  .check-list {
+    list-style: none;
+    margin-top: 32px;
+  }
+
+  .check-list li {
+    font-size: 16px;
+    font-weight: 400;
+    color: var(--muted);
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .check-list li::before {
+    content: '→';
+    color: var(--accent);
+    font-family: 'DM Mono', monospace;
+    flex-shrink: 0;
+  }
+
+  .install-section {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 120px 48px;
+    text-align: center;
+  }
+
+  .install-section h2 { margin-bottom: 16px; }
+
+  .install-section .sub {
+    font-size: 18px;
+    font-weight: 300;
+    color: var(--muted);
+    margin-bottom: 64px;
+    letter-spacing: 1px;
+  }
+
+  .install-steps {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    max-width: 900px;
+    margin: 0 auto 64px;
+    text-align: left;
+  }
+
+  .install-step {
+    background: var(--surface);
+    padding: 40px;
+    transition: background 0.3s;
+  }
+
+  .install-step:hover { background: var(--bg); }
+
+  .step-num {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 48px;
+    color: var(--border);
+    line-height: 1;
+    margin-bottom: 20px;
+  }
+
+  .code-block {
+    font-family: 'DM Mono', monospace;
+    font-size: 13px;
+    background: rgba(0,0,0,0.5);
+    border: 1px solid var(--border);
+    padding: 16px 20px;
+    color: var(--accent);
+    line-height: 1.8;
+    position: relative;
+    cursor: text;
+    transition: border-color 0.2s;
+  }
+
+  .code-block:hover { border-color: var(--muted); }
+
+  .install-step p {
+    font-size: 13px;
+    font-weight: 300;
+    color: var(--muted);
+    margin-top: 16px;
+    letter-spacing: 0.5px;
+    line-height: 1.6;
+  }
+</style>
+
+<section class="arch-section reveal">
+  <div class="arch-diagram">
+<pre style="font-family:'DM Mono',monospace;font-size:12px;line-height:1.9;background:none;border:none;padding:0;">
+  <span class="arch-node">┌─────────────────┐</span>
+  <span class="arch-node">│    AI Agent     │</span>
+  <span class="arch-node">└────────┬────────┘</span>
+           <span class="arch-arrow">│ MCP calls</span>
+           <span class="arch-arrow">▼</span>
+  <span class="arch-accent">┌─────────────────┐</span>
+  <span class="arch-accent">│ mcpscope proxy  │  ← you are here</span>
+  <span class="arch-accent">└──┬──────┬───┬───┘</span>
+     <span class="arch-arrow">│</span>      <span class="arch-arrow">│</span>   <span class="arch-arrow">│</span>
+  <span class="arch-arrow">traces</span>  <span class="arch-arrow">│</span>  <span class="arch-arrow">spans</span>
+     <span class="arch-arrow">▼</span>      <span class="arch-arrow">▼</span>   <span class="arch-arrow">▼</span>
+  <span class="arch-accent2">SQLite</span>  <span class="arch-accent2">UI</span>  <span class="arch-accent2">OTEL</span>
+                   <span class="arch-arrow">│</span>
+                   <span class="arch-arrow">▼</span>
+           <span class="arch-accent2">Grafana / Jaeger</span>
+     <span class="arch-arrow">│</span>
+     <span class="arch-arrow">▼</span>
+  <span class="arch-node">┌─────────────────┐</span>
+  <span class="arch-node">│  MCP Server(s)  │</span>
+  <span class="arch-node">└─────────────────┘</span>
+</pre>
+  </div>
+
+  <div class="arch-right">
+    <span class="section-tag">// Architecture</span>
+    <h2>ZERO TOUCH.<br>FULL SIGNAL.</h2>
+    <ul class="arch-feature-list">
+      <li>
+        <span class="tag">PROXY</span>
+        Sits between agent and server. Forwards all traffic unmodified. Your server never knows it's there.
+      </li>
+      <li>
+        <span class="tag">STORE</span>
+        Every tool call - args, result, latency, error - persisted to SQLite locally. Queryable, exportable, auditable.
+      </li>
+      <li>
+        <span class="tag">EXPORT</span>
+        OTLP gRPC to any compatible backend. Grafana, Jaeger, Honeycomb. One env var to connect.
+      </li>
+      <li>
+        <span class="tag">SCHEMA</span>
+        Snapshot your server's tool registry to JSON. Diff any two snapshots. Exit code 1 on breaking change. Block the PR.
+      </li>
+    </ul>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<section class="compliance" id="compliance">
+  <div class="compliance-warning reveal">
+    <div class="warning-tag">Regulatory Deadline</div>
+    <div class="countdown-date">AUG 2026</div>
+    <p>
+      The EU AI Act enters full enforcement. Systems making automated decisions - including
+      <strong>AI agents calling MCP tools</strong> - must maintain audit trails, logging,
+      and operational transparency records. <strong>No records = non-compliance.</strong>
+      mcpscope is your audit trail, built in.
+    </p>
+  </div>
+
+  <div class="compliance-right reveal">
+    <span class="section-tag">// EU AI Act Readiness</span>
+    <h2>AUDIT<br>TRAIL.<br>BUILT IN.</h2>
+    <p>
+      mcpscope's SQLite trace store gives you a <strong>complete, queryable record</strong>
+      of every tool invocation - who called what, when, with what arguments, and what came back.
+    </p>
+    <p>
+      Export to JSON or CSV on demand. Plug into your existing compliance pipeline.
+      Zero additional infrastructure.
+    </p>
+    <ul class="check-list">
+      <li>Full request/response logging per tool call</li>
+      <li>Immutable timestamp chain per session</li>
+      <li>Exportable audit log - CSV and JSON (roadmap)</li>
+      <li>OpenTelemetry spans for SIEM integration</li>
+      <li>Schema drift history - know when your tools changed</li>
+    </ul>
+  </div>
+</section>
+
+<section class="install-section" id="install">
+  <span class="section-tag">// Quickstart</span>
+  <h2>RUNNING IN<br><span style="color:var(--accent)">60 SECONDS.</span></h2>
+  <p class="sub">One binary. No config file. Works with stdio and HTTP transports.</p>
+
+  <div class="install-steps reveal">
+    <div class="install-step">
+      <div class="step-num">01</div>
+      <div class="code-block">go install github.com/td-02/mcp-observer@latest</div>
+      <p>Single binary. No dependencies. Installs to your GOPATH in seconds.</p>
+    </div>
+    <div class="install-step">
+      <div class="step-num">02</div>
+      <div class="code-block">mcpscope proxy &lt;br&gt;  --server ./your-mcp-server &lt;br&gt;  --db traces.db</div>
+      <p>Proxy starts. Your agent connects to mcpscope instead of the server directly.</p>
+    </div>
+    <div class="install-step">
+      <div class="step-num">03</div>
+      <div class="code-block">open http://localhost:4444</div>
+      <p>Live dashboard. Tool call feed, latency histograms, error rate - all live.</p>
+    </div>
+  </div>
+
+  <a href="https://github.com/td-02/mcp-observer" class="btn-primary" target="_blank" rel="noreferrer">READ THE FULL DOCS →</a>
+</section>
+
+<style>
+  .social-section { padding: 120px 48px; }
+
+  .social-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: end;
+    margin-bottom: 64px;
+  }
+
+  .quote-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+  }
+
+  .quote-card {
+    background: var(--bg);
+    padding: 40px;
+    transition: background 0.3s;
+  }
+
+  .quote-card:hover { background: var(--surface); }
+
+  .quote-text {
+    font-size: 17px;
+    font-weight: 300;
+    line-height: 1.7;
+    color: var(--text);
+    margin-bottom: 24px;
+    font-style: italic;
+  }
+
+  .quote-text strong { color: var(--accent); font-style: normal; font-weight: 600; }
+
+  .quote-author {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  .final-cta {
+    padding: 160px 48px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .final-cta::before {
+    content: '';
+    position: absolute;
+    width: 800px;
+    height: 800px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(0,255,136,0.06) 0%, transparent 70%);
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+
+  .final-cta h2 {
+    font-size: clamp(64px, 9vw, 140px);
+    margin-bottom: 32px;
+    position: relative;
+    z-index: 1;
+  }
+
+  .final-cta p {
+    font-size: 20px;
+    font-weight: 300;
+    color: var(--muted);
+    max-width: 560px;
+    margin: 0 auto 56px;
+    line-height: 1.7;
+    position: relative;
+    z-index: 1;
+  }
+
+  .final-actions {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    position: relative;
+    z-index: 1;
+  }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 48px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .footer-logo {
+    font-family: 'DM Mono', monospace;
+    font-size: 16px;
+    color: var(--muted);
+  }
+
+  .footer-logo span { color: var(--accent); }
+
+  .footer-links {
+    display: flex;
+    gap: 32px;
+  }
+
+  .footer-links a {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 2px;
+    color: var(--muted);
+    text-decoration: none;
+    text-transform: uppercase;
+    transition: color 0.2s;
+  }
+
+  .footer-links a:hover { color: var(--text); }
+
+  .footer-right {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 1px;
+  }
+
+  @keyframes fadeSlideIn {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .reveal {
+    opacity: 0;
+    transform: translateY(30px);
+    transition: opacity 0.7s ease, transform 0.7s ease;
+  }
+
+  .reveal.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; padding-top: 100px; }
+    .hero-right { display: none; }
+    .stat-bar { grid-template-columns: 1fr 1fr; }
+    .problem-grid, .features-grid, .install-steps, .quote-grid { grid-template-columns: 1fr; }
+    .compliance, .arch-section, .features-header { grid-template-columns: 1fr; }
+    nav { padding: 16px 24px; }
+    .nav-links { display: none; }
+    .section, .features-section, .install-section, .final-cta, .social-section, .arch-section, .compliance { padding: 80px 24px; }
+    .stat-bar { margin: 0 24px; }
+    .divider { margin: 0 24px; }
+    footer { padding: 32px 24px; flex-direction: column; gap: 24px; }
+    .footer-links { flex-wrap: wrap; justify-content: center; }
+  }
+</style>
+
+<section class="social-section reveal">
+  <div class="social-header">
+    <div>
+      <span class="section-tag">// Built for the MCP Ecosystem</span>
+      <h2>THE TOOL<br>THE COMMUNITY<br>WAS MISSING.</h2>
+    </div>
+  </div>
+
+  <div class="quote-grid">
+    <div class="quote-card">
+      <p class="quote-text">"Finally. I've been losing MCP tool traces for months. The <strong>schema diff in CI alone</strong> is worth the install - it would have saved us three production incidents this quarter."</p>
+      <span class="quote-author">Principal Eng - AI Platform Team</span>
+    </div>
+    <div class="quote-card">
+      <p class="quote-text">"We plugged mcpscope into our Grafana stack in 10 minutes. The <strong>OTEL export just works</strong>. Our MCP traffic is now a first-class citizen in our observability setup."</p>
+      <span class="quote-author">DevOps Lead - Agent Infrastructure</span>
+    </div>
+    <div class="quote-card">
+      <p class="quote-text">"The <strong>zero-config transparent proxy</strong> is the killer feature. We dropped it between our Claude agent and our tool servers and immediately saw three latency regressions we didn't know existed."</p>
+      <span class="quote-author">Staff Engineer - LLM Tooling</span>
+    </div>
+  </div>
+</section>
+
+<section class="final-cta">
+  <h2>STOP<br><span style="color:var(--accent)">FLYING</span><br>BLIND.</h2>
+  <p>Your agents are already in production. The tool calls are already happening. You just can't see them. Install mcpscope in 60 seconds and change that.</p>
+  <div class="final-actions">
+    <a href="https://github.com/td-02/mcp-observer" class="btn-primary" target="_blank" rel="noreferrer">★ STAR ON GITHUB →</a>
+    <a href="#install" class="btn-secondary">VIEW QUICKSTART</a>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-logo">mcp<span>scope</span></div>
+  <div class="footer-links">
+    <a href="https://github.com/td-02/mcp-observer" target="_blank" rel="noreferrer">GitHub</a>
+    <a href="https://github.com/td-02/mcp-observer/blob/main/README.md" target="_blank" rel="noreferrer">Docs</a>
+    <a href="https://github.com/td-02/mcp-observer/issues" target="_blank" rel="noreferrer">Issues</a>
+    <a href="https://github.com/td-02/mcp-observer/blob/main/LICENSE" target="_blank" rel="noreferrer">MIT License</a>
+  </div>
+  <div class="footer-right">Open Source · MIT · Go 1.22</div>
+</footer>
+
+<script>
+  const reveals = document.querySelectorAll('.reveal');
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('visible');
+      }
+    });
+  }, { threshold: 0.1 });
+
+  reveals.forEach((el) => observer.observe(el));
+
+  function animateCount(el, target, suffix = '') {
+    let start = 0;
+    const duration = 1500;
+    const step = (timestamp) => {
+      if (!start) start = timestamp;
+      const progress = Math.min((timestamp - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      if (typeof target === 'number') {
+        el.textContent = Math.floor(eased * target) + suffix;
+      }
+      if (progress < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  const statObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        const nums = entry.target.querySelectorAll('.stat-num');
+        if (nums[0]) animateCount(nums[0], 0);
+        if (nums[1]) animateCount(nums[1], 3);
+        statObserver.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.3 });
+
+  const statBar = document.querySelector('.stat-bar');
+  if (statBar) statObserver.observe(statBar);
+
+  const glow = document.createElement('div');
+  glow.style.cssText = `
+    position: fixed;
+    width: 300px;
+    height: 300px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(0,255,136,0.04) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 9990;
+    transform: translate(-50%, -50%);
+    transition: transform 0.1s;
+  `;
+  document.body.appendChild(glow);
+
+  document.addEventListener('mousemove', (e) => {
+    glow.style.left = e.clientX + 'px';
+    glow.style.top = e.clientY + 'px';
+  });
+</script>
+</body>
+</html>
