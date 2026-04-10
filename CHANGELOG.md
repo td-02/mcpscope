@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+- Added trace search plus `created_after` and `created_before` filtering in the dashboard and trace APIs.
+- Added alert rule editing and enable/disable controls in the dashboard.
+- Tightened trace timestamp handling so retention and time-range filters behave consistently.
+
 ## v0.1.0
 
 - Added a transparent MCP proxy for stdio and HTTP transport with unchanged JSON-RPC forwarding.
